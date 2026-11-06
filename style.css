@@ -292,3 +292,32 @@ body { padding-bottom: calc(env(safe-area-inset-bottom) + 150px); }
 .pos .t .now { margin-left: 6px; font-weight: 600; font-size: 13px; color: var(--muted); }
 .pos .t .chip { margin-left: 4px; padding: 1px 5px; }
 .pos > div:nth-child(2) { min-width: 0; }
+
+/* ---------- Screener CVM ---------- */
+.adv { background: var(--card); border-radius: var(--radius); padding: 10px 14px; margin: 4px 0 10px; }
+.adv summary { cursor: pointer; font-weight: 700; font-size: 14.5px; color: var(--accent); }
+.adv[open] summary { margin-bottom: 10px; }
+.adv-g { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.adv-g label { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--muted); }
+.adv-g select { background: var(--card2); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 8px; font-size: 14px; }
+.adv-g .chk { grid-column: 1 / -1; flex-direction: row; align-items: center; gap: 8px; font-size: 13.5px; color: var(--text); }
+.scr-top { align-items: center; }
+.scr-l { min-width: 0; flex: 1; }
+.scr-sp { flex: none; }
+.spark { width: 54px; height: 22px; display: block; }
+.spark rect.up { fill: #22c55e; } .spark rect.down { fill: #ef4444; } .spark rect.na { fill: var(--line); }
+.kpis { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 8px; font-size: 12.5px; color: var(--muted); }
+.kpis b { color: var(--text); font-weight: 600; }
+.kpis .up { color: #22c55e; font-weight: 600; }
+.grid.three { grid-template-columns: repeat(3, 1fr); }
+h3.sub small { font-weight: 500; color: var(--muted); font-size: 12px; margin-left: 6px; }
+.bars { margin-bottom: 14px; }
+.bars-t { font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+.bars-g { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 6px; }
+.bc { display: flex; flex-direction: column; align-items: center; gap: 3px; min-width: 0; }
+.bc em { font-style: normal; font-size: 10.5px; color: var(--text); white-space: nowrap; }
+.bc em.down { color: #ef4444; }
+.bc span { font-size: 11px; color: var(--muted); }
+.bw { height: 70px; width: 100%; display: flex; align-items: flex-end; }
+.bw .b { width: 100%; background: #3b82f6; border-radius: 4px 4px 0 0; }
+.bw .b.down { background: #ef4444; }

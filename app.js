@@ -217,77 +217,87 @@ async function fetchHistory(ticker) {
 }
 
 // =====================================================================
-// Avaliação (screener do projeto Avaliador de Ações da B3, MIT)
+// Screener: fundamentos oficiais da CVM (gerados no GitHub, data/screener.json)
 // =====================================================================
-const SCREENER_BASE = 'https://raw.githubusercontent.com/gustavocduarte/avaliador-acoes-b3/master/data/processed/';
-
-function parseCSV(text) {
-  const rows = []; let row = [], f = '', q = false;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (q) {
-      if (c === '"') { if (text[i + 1] === '"') { f += '"'; i++; } else q = false; }
-      else f += c;
-    } else if (c === '"') q = true;
-    else if (c === ',') { row.push(f); f = ''; }
-    else if (c === '\n' || c === '\r') {
-      if (c === '\r' && text[i + 1] === '\n') i++;
-      row.push(f); rows.push(row); row = []; f = '';
-    } else f += c;
-  }
-  if (f || row.length) { row.push(f); rows.push(row); }
-  const [head, ...body] = rows.filter((r) => r.length > 1);
-  return body.map((r) => Object.fromEntries(head.map((h, i) => [h, r[i] ?? ''])));
-}
+const SCREENER_URL = 'data/screener.json';
 
 async function loadScreener(force = false) {
-  if (!force && screener && Date.now() - screener.fetchedAt < 6 * 3600_000) return;
+  if (!force && screener?.v === 2 && Date.now() - screener.fetchedAt < 6 * 3600_000) { buildRows(); return; }
   try {
-    const [csv, rod] = await Promise.all([
-      fetch(SCREENER_BASE + 'screener.csv', { cache: 'no-cache' }).then((r) => { if (!r.ok) throw new Error(r.status); return r.text(); }),
-      fetch(SCREENER_BASE + 'rodada.json', { cache: 'no-cache' }).then((r) => r.json()).catch(() => ({})),
-    ]);
-    const f = (v) => { const n = parseFloat(v); return isFinite(n) && n > 0 ? n : null; };
-    const rows = {};
-    for (const r of parseCSV(csv)) {
-      if (!r.ticker || r.sucesso !== 'True') continue;
-      rows[r.ticker] = {
-        price: f(r.preco_atual),
-        combined: f(r.valor_combinado),
-        graham: f(r.graham_valor_justo),
-        bazin: f(r.bazin_preco_teto),
-        fcd: f(r.fcd_valor_justo),
-        divergence: parseFloat(r.divergencia_percentual_metodos),
-        reinvest: parseFloat(r.proporcao_reinvestimento_percentual),
-        divRatio: parseFloat(r.bazin_razao_dividendos_percentual),
-        beta: parseFloat(r.beta_utilizado),
-        warning: r.aviso_desconto_extremo || '',
-        sector: r.segmento_setorial || 'Sem setor',
-      };
-    }
-    if (!Object.keys(rows).length) throw new Error('vazio');
-    screener = { fetchedAt: Date.now(), rodada: rod.data_rodada || '', rows };
+    const r = await fetch(SCREENER_URL, { cache: 'no-cache' });
+    if (!r.ok) throw new Error(r.status);
+    const j = await r.json();
+    if (!j.tk || !Object.keys(j.tk).length) throw new Error('vazio');
+    screener = { v: 2, fetchedAt: Date.now(), rodada: j.gerado, anos: j.anos, emp: j.emp, tk: j.tk };
     save(KEY_SCREENER, screener);
+    buildRows();
     render();
     renderScreener();
   } catch (e) {
-    if (force) toast('Não foi possível baixar as avaliações');
+    if (force) toast('Não foi possível baixar o screener');
   }
+}
+// Dados antigos (outra fonte) não servem mais
+if (screener && screener.v !== 2) screener = null;
+
+function buildRows() {
+  if (!screener || screener.rows) return;
+  screener.rows = {};
+  for (const t of Object.keys(screener.tk)) screener.rows[t] = calc(t);
+}
+
+const lastNum = (a) => { for (let i = a.length - 1; i >= 0; i--) if (a[i] != null) return [a[i], i]; return [null, -1]; };
+// Quantos anos seguidos o valor subiu até o último balanço
+function streak(a) {
+  const [, i0] = lastNum(a);
+  let n = 0;
+  for (let i = i0; i > 0 && a[i] != null && a[i - 1] != null && a[i] > a[i - 1]; i--) n++;
+  return n;
+}
+
+// Indicadores de um código com o preço informado (ou o do arquivo)
+function calc(t, livePrice) {
+  const raw = screener?.tk[t];
+  if (!raw) return null;
+  const [ei, filePrice, k] = raw;
+  const e = screener.emp[ei];
+  const price = livePrice || filePrice;
+  const pps = price / k;                       // preço por ação (units valem k ações)
+  const sh = e.ac;                             // milhões de ações
+  const [lc, li] = lastNum(e.lc);
+  const pl = e.pl[li], rec = e.r[li], lucro = e.l[li];
+  const lpa = sh && lc != null ? lc / sh : null;
+  const vpa = sh && pl != null ? pl / sh : null;
+  const dv = e.dv.slice(Math.max(0, li - 4), li + 1);
+  const dpsAvg3 = sh ? dv.slice(-3).reduce((s, x) => s + (x || 0), 0) / 3 / sh : null;
+  const graham = lpa > 0 && vpa > 0 ? Math.sqrt(22.5 * lpa * vpa) * k : null;
+  const bazin = dv.length === 5 && dv.every((x) => x > 0) ? dpsAvg3 / 0.06 * k : null;
+  const vals = [graham, bazin].filter(Boolean);
+  const combined = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+  const lcs = e.lc.slice(Math.max(0, li - 4), li + 1);
+  return {
+    ticker: t, name: e.n, sector: e.s || 'Sem setor', fin: !!e.fin, emp: ei, year: screener.anos[li],
+    price, vol: raw[3],
+    pe: lpa > 0 ? pps / lpa : null,
+    pvp: vpa > 0 ? pps / vpa : null,
+    roe: pl > 0 && lc != null ? lc / pl * 100 : null,
+    margin: rec > 0 && lucro != null && !e.fin ? lucro / rec * 100 : null,
+    dy: sh && dv.length && dv[dv.length - 1] != null ? dv[dv.length - 1] / sh / pps * 100 : null,
+    debt: !e.fin && pl > 0 && e.dl != null ? e.dl / pl : null,
+    profitUp: streak(e.lc), revUp: e.fin ? null : streak(e.r),
+    noLoss: lcs.length === 5 && lcs.every((x) => x > 0),
+    graham, bazin, combined,
+    methods: [['Graham', graham], ['Bazin', bazin]].filter(([, v]) => v),
+    min: vals.length ? Math.min(...vals) : null,
+    max: vals.length ? Math.max(...vals) : null,
+    potential: combined && price ? (combined / price - 1) * 100 : null,
+  };
 }
 
 // Avaliação de uma ação com o preço mais recente que tivermos
 function valuation(ticker) {
-  const s = screener?.rows[ticker];
-  if (!s) return null;
-  const price = quotes[ticker]?.price || s.price;
-  const methods = [['Graham', s.graham], ['Bazin', s.bazin], ['FCD', s.fcd]].filter(([, v]) => v);
-  const vals = methods.map(([, v]) => v);
-  return {
-    ...s, price, methods,
-    min: vals.length ? Math.min(...vals) : null,
-    max: vals.length ? Math.max(...vals) : null,
-    potential: s.combined && price ? (s.combined / price - 1) * 100 : null,
-  };
+  if (!screener?.tk[ticker]) return null;
+  return calc(ticker, quotes[ticker]?.price);
 }
 
 // =====================================================================
@@ -437,8 +447,30 @@ const PALETTE = ['#3b82f6', '#22c55e', '#f59e0b', '#a855f7', '#ef4444', '#14b8a6
 // =====================================================================
 // Render — aba Screener
 // =====================================================================
+const dec = (v, d = 1) => v == null || !isFinite(v) ? '—' : v.toLocaleString('pt-BR', { minimumFractionDigits: d, maximumFractionDigits: d });
+const FILTERS = {
+  fProfit: (r, v) => r.profitUp >= +v,
+  fRev: (r, v) => r.revUp != null && r.revUp >= +v,
+  fRoe: (r, v) => r.roe != null && r.roe >= +v,
+  fPe: (r, v) => r.pe != null && r.pe <= +v,
+  fDy: (r, v) => r.dy != null && r.dy >= +v,
+  fDebt: (r, v) => r.debt == null ? r.fin : r.debt <= +v,
+  fMargin: (r, v) => r.margin != null && r.margin >= +v,
+};
+
+function spark(vals) {
+  const v = vals.slice(-6);
+  const max = Math.max(...v.map((x) => Math.abs(x || 0)), 1e-9);
+  const w = 6, gap = 3, h = 22;
+  return `<svg class="spark" viewBox="0 0 ${v.length * (w + gap)} ${h}" aria-hidden="true">${v.map((x, i) => {
+    const bh = Math.max(1.5, Math.abs(x || 0) / max * (h / 2 - 1));
+    return `<rect x="${i * (w + gap)}" y="${x >= 0 ? h / 2 - bh : h / 2}" width="${w}" height="${bh}" rx="1.5" class="${x == null ? 'na' : x >= 0 ? 'up' : 'down'}"/>`;
+  }).join('')}</svg>`;
+}
+
 function renderScreener() {
-  if (!screener) { $('#scrMeta').textContent = 'Carregando avaliações…'; $('#scrList').innerHTML = ''; return; }
+  if (!screener) { $('#scrMeta').textContent = 'Carregando dados da CVM…'; $('#scrList').innerHTML = ''; return; }
+  buildRows();
   const sel = $('#scrSector');
   if (sel.options.length <= 1) {
     const sectors = [...new Set(Object.values(screener.rows).map((r) => r.sector))].sort((a, b) => a.localeCompare(b, 'pt-BR'));
@@ -447,41 +479,49 @@ function renderScreener() {
   const term = norm($('#scrSearch').value);
   const sector = sel.value;
   const need = [...document.querySelectorAll('#scrMethods input[value]:checked')].map((i) => i.value);
-  const hideExt = $('#scrHideExtreme').checked;
+  const liquid = $('#scrLiquid').checked;
+  const noLoss = $('#fNoLoss').checked;
+  const active = Object.keys(FILTERS).filter((id) => $('#' + id).value);
   const owned = new Set(positions().filter((p) => p.qty > 0).map((p) => p.ticker));
+  const nAdv = active.length + (noLoss ? 1 : 0);
+  $('#advCount').textContent = nAdv ? `(${nAdv})` : '';
 
-  let rows = Object.keys(screener.rows).map((t) => ({ ticker: t, ...valuation(t) }))
-    .filter((r) => !term || norm(r.ticker).includes(term) || norm(r.sector).includes(term))
+  const rows = Object.keys(screener.rows).map((t) => valuation(t))
+    .filter((r) => !term || norm(r.ticker).includes(term) || norm(r.sector).includes(term) || norm(r.name).includes(term))
     .filter((r) => !sector || r.sector === sector)
     .filter((r) => need.every((m) => r[m]))
-    .filter((r) => !hideExt || !r.warning);
-  const sort = $('#scrSort').value;
-  const potv = (r) => r.potential ?? -Infinity;
-  rows.sort(sort === 'pot' ? (a, b) => potv(b) - potv(a)
-    : sort === 'potAsc' ? (a, b) => (a.potential ?? Infinity) - (b.potential ?? Infinity)
-    : sort === 'div' ? (a, b) => (a.divergence || Infinity) - (b.divergence || Infinity)
-    : (a, b) => a.ticker.localeCompare(b.ticker));
+    .filter((r) => !liquid || r.vol >= 1 || owned.has(r.ticker))
+    .filter((r) => !noLoss || r.noLoss)
+    .filter((r) => active.every((id) => FILTERS[id](r, $('#' + id).value)));
+  const asc = (f) => (a, b) => (f(a) ?? Infinity) - (f(b) ?? Infinity);
+  const desc = (f) => (a, b) => (f(b) ?? -Infinity) - (f(a) ?? -Infinity);
+  rows.sort({
+    pot: desc((r) => r.potential), potAsc: asc((r) => r.potential), pe: asc((r) => r.pe), dy: desc((r) => r.dy),
+    roe: desc((r) => r.roe), up: (a, b) => b.profitUp - a.profitUp || (b.roe ?? -1e9) - (a.roe ?? -1e9),
+    tk: (a, b) => a.ticker.localeCompare(b.ticker),
+  }[$('#scrSort').value] || desc((r) => r.potential));
 
-  const withPot = rows.filter((r) => r.potential != null);
-  const above = withPot.filter((r) => r.potential > 0).length;
   const d = screener.rodada ? new Date(screener.rodada) : null;
-  $('#scrMeta').innerHTML = `${rows.length} ações · ${above} com potencial positivo` +
-    (d && !isNaN(d) ? ` · avaliação de ${d.toLocaleDateString('pt-BR')}` : '');
+  const year = Object.values(screener.rows)[0]?.year;
+  $('#scrMeta').innerHTML = `${rows.length} ações · balanço ${year || ''} (CVM)` +
+    (d && !isNaN(d) ? ` · preços de ${d.toLocaleDateString('pt-BR')}` : '');
 
-  $('#scrList').innerHTML = rows.map((r) => {
+  const shown = rows.slice(0, 150);
+  $('#scrList').innerHTML = (shown.map((r) => {
     const pot = r.potential;
-    const w = pot == null ? 0 : Math.min(100, Math.abs(pot));
     return `<button class="scr" data-a="${esc(r.ticker)}">
       <div class="scr-top">
-        <div><span class="t">${esc(r.ticker)}</span>${owned.has(r.ticker) ? '<span class="chip own">na carteira</span>' : ''}${r.warning ? '<span class="chip warn-c">extremo</span>' : ''}
+        <div class="scr-l"><span class="t">${esc(r.ticker)}</span>${owned.has(r.ticker) ? '<span class="chip own">na carteira</span>' : ''}
           <div class="s">${esc(r.sector)}</div></div>
+        <div class="scr-sp" title="Lucro por ano">${spark(screener.emp[r.emp].lc)}</div>
         <div class="r"><div class="v ${pot == null ? '' : cls(pot)}">${pot == null ? '—' : pct(pot)}</div>
-          <div class="s">${money(r.price)} → ${r.combined ? money(r.combined) : 's/ valor'}</div></div>
+          <div class="s">${money(r.price)}${r.combined ? ` → ${money(r.combined)}` : ''}</div></div>
       </div>
-      <div class="potbar ${pot != null && pot < 0 ? 'neg' : ''}"><div style="width:${w}%"></div></div>
-      <div class="methods">${['graham', 'bazin', 'fcd'].map((m) => `<span class="${r[m] ? 'on' : ''}">${m === 'fcd' ? 'FCD' : m[0].toUpperCase() + m.slice(1)}</span>`).join('')}</div>
+      <div class="kpis"><span>P/L <b>${dec(r.pe)}</b></span><span>ROE <b>${r.roe == null ? '—' : pct0(r.roe)}</b></span>
+        <span>DY <b>${r.dy == null ? '—' : pct0(r.dy)}</b></span>${r.profitUp >= 2 ? `<span class="up">lucro ↑ ${r.profitUp} anos</span>` : ''}</div>
     </button>`;
-  }).join('') || '<p class="empty">Nenhuma ação com esses filtros.</p>';
+  }).join('') + (rows.length > shown.length ? `<p class="note">Mostrando 150 de ${rows.length}. Use a busca ou os filtros.</p>` : ''))
+    || '<p class="empty">Nenhuma ação com esses filtros.</p>';
 }
 
 // =====================================================================
@@ -498,6 +538,15 @@ async function openAsset(ticker) {
   } catch {
     const el = $('#chart'); if (el) el.innerHTML = '<div class="note">Histórico indisponível (confira o token em ⚙).</div>';
   }
+}
+
+function barChart(title, years, vals) {
+  if (!vals.some((x) => x != null)) return '';
+  const max = Math.max(...vals.map((x) => Math.abs(x || 0)), 1e-9);
+  const fmt = (x) => x == null ? '—' : Math.abs(x) >= 1000 ? `${dec(x / 1000)} bi` : `${dec(x, 0)} mi`;
+  return `<div class="bars"><div class="bars-t">${title}</div><div class="bars-g">${vals.map((x, i) => `
+    <div class="bc"><em class="${x < 0 ? 'down' : ''}">${fmt(x)}</em><div class="bw"><div class="b ${x < 0 ? 'down' : ''}" style="height:${x == null ? 0 : Math.max(2, Math.abs(x) / max * 100).toFixed(1)}%"></div></div><span>${String(years[i]).slice(2)}</span></div>`).join('')}
+  </div></div>`;
 }
 
 function drawAsset(ticker, p, h) {
@@ -527,26 +576,35 @@ function drawAsset(ticker, p, h) {
     </div>`;
   }
 
-  // Valor justo
+  // Valor justo + fundamentos (CVM)
   if (v) {
-    const scale = Math.max(price || 0, ...v.methods.map(([, x]) => x), v.combined || 0) * 1.05;
-    const row = (label, x, strong) => `<div class="vj ${strong ? 'strong' : ''}"><span>${label}</span>
-      <div class="track"><div style="width:${(x / scale * 100).toFixed(1)}%"></div>${price ? `<i style="left:${(price / scale * 100).toFixed(1)}%"></i>` : ''}</div>
-      <b>${money(x)}</b><em class="${cls(x - price)}">${price ? pct((x / price - 1) * 100) : ''}</em></div>`;
-    html += `<h3 class="sub">Valor justo estimado</h3><div class="card">
-      ${v.combined ? row('Combinado', v.combined, true) : '<div class="note">Nenhum método se aplica a esta ação.</div>'}
-      ${v.methods.map(([m, x]) => row(m, x)).join('')}
-      ${['Graham', 'Bazin', 'FCD'].filter((m) => !v.methods.some(([n]) => n === m)).map((m) => `<div class="vj na"><span>${m}</span><div class="na-t">não se aplica</div></div>`).join('')}
-      <div class="note">Linha branca = preço atual. ${v.methods.length > 1 && isFinite(v.divergence) ? `Divergência entre métodos: ${pct0(v.divergence)}.` : ''}
-        ${isFinite(v.beta) ? ` Beta ${v.beta.toFixed(2).replace('.', ',')}.` : ''}</div>
-      ${v.warning ? `<div class="note warn-t">${esc(v.warning)}</div>` : ''}
-      <details class="how"><summary>Como é calculado</summary>
-        <p><b>Graham:</b> √(22,5 × LPA × VPA); só com lucro e patrimônio positivos.</p>
-        <p><b>Bazin:</b> dividendos dos últimos 12 meses ÷ 6%; só com dividendos em cada um dos últimos 5 anos.</p>
-        <p><b>FCD:</b> fluxo de caixa livre projetado 5 anos e descontado pelo WACC; não se aplica a bancos e seguradoras.</p>
-        <p><b>Combinado:</b> média dos métodos que se aplicam. Fonte: Avaliador de Ações da B3 (MIT). Não é recomendação.</p>
-      </details>
-    </div>`;
+    const e = screener.emp[v.emp];
+    if (v.combined) {
+      const scale = Math.max(price || 0, ...v.methods.map(([, x]) => x), v.combined || 0) * 1.05;
+      const row = (label, x, strong) => `<div class="vj ${strong ? 'strong' : ''}"><span>${label}</span>
+        <div class="track"><div style="width:${(x / scale * 100).toFixed(1)}%"></div>${price ? `<i style="left:${(price / scale * 100).toFixed(1)}%"></i>` : ''}</div>
+        <b>${money(x)}</b><em class="${cls(x - price)}">${price ? pct((x / price - 1) * 100) : ''}</em></div>`;
+      html += `<h3 class="sub">Valor justo estimado</h3><div class="card">
+        ${row('Combinado', v.combined, true)}
+        ${v.methods.map(([m, x]) => row(m, x)).join('')}
+        ${['Graham', 'Bazin'].filter((m) => !v.methods.some(([n]) => n === m)).map((m) => `<div class="vj na"><span>${m}</span><div class="na-t">não se aplica</div></div>`).join('')}
+        <div class="note">Linha branca = preço atual.</div>
+        <details class="how"><summary>Como é calculado</summary>
+          <p><b>Graham:</b> √(22,5 × LPA × VPA), com lucro e patrimônio dos controladores do último balanço anual.</p>
+          <p><b>Bazin:</b> média dos dividendos e JCP pagos nos últimos 3 anos ÷ 6%; só se pagou em cada um dos últimos 5 anos.</p>
+          <p><b>Combinado:</b> média dos métodos que se aplicam. Estimativa para estudo, não é recomendação.</p>
+        </details>
+      </div>`;
+    }
+    const cellv = (l, val) => `<div class="cell"><div class="label">${l}</div><div class="v">${val}</div></div>`;
+    html += `<h3 class="sub">Fundamentos <small>balanço ${v.year} · CVM</small></h3>
+      <div class="grid three">
+        ${cellv('P/L', dec(v.pe))}${cellv('P/VP', dec(v.pvp, 2))}${cellv('ROE', v.roe == null ? '—' : pct0(v.roe))}
+        ${cellv('Margem líq.', v.margin == null ? '—' : pct0(v.margin))}${cellv('Div. Yield', v.dy == null ? '—' : pct0(v.dy))}
+        ${cellv('Dív. líq./PL', v.fin ? 'n/a' : dec(v.debt, 2))}
+      </div>
+      <div class="card">${barChart('Lucro líquido', screener.anos, e.lc)}${e.fin ? '' : barChart('Receita', screener.anos, e.r)}${barChart('Dividendos e JCP pagos', screener.anos, e.dv)}
+        <div class="note">Fonte: demonstrações anuais entregues à CVM.</div></div>`;
   }
 
   // Proventos por ação (brapi)
@@ -990,6 +1048,8 @@ $('#quick').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.prev
 document.querySelectorAll('input[name=comp]').forEach((i) => i.addEventListener('change', render));
 ['#scrSearch', '#scrSector', '#scrSort'].forEach((s) => $(s).addEventListener('input', renderScreener));
 $('#scrMethods').addEventListener('change', renderScreener);
+$('#scrAdv').addEventListener('change', renderScreener);
+$('#advClear').onclick = () => { document.querySelectorAll('#scrAdv select').forEach((x) => (x.value = '')); $('#fNoLoss').checked = false; renderScreener(); };
 
 $('#formTx').addEventListener('submit', (e) => {
   e.preventDefault();

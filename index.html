@@ -55,27 +55,44 @@
 
   <!-- Aba Screener -->
   <main id="tabScreener" class="hidden">
-    <input id="scrSearch" class="search" type="search" placeholder="Buscar código ou setor" autocomplete="off" autocapitalize="characters">
+    <input id="scrSearch" class="search" type="search" placeholder="Buscar código, empresa ou setor" autocomplete="off">
     <div class="filters">
       <select id="scrSector" aria-label="Setor"><option value="">Todos os setores</option></select>
       <select id="scrSort" aria-label="Ordenar">
         <option value="pot">Maior potencial</option>
         <option value="potAsc">Menor potencial</option>
+        <option value="up">Lucro subindo há mais tempo</option>
+        <option value="pe">Menor P/L</option>
+        <option value="dy">Maior dividend yield</option>
+        <option value="roe">Maior ROE</option>
         <option value="tk">Código A–Z</option>
-        <option value="div">Menor divergência</option>
       </select>
     </div>
     <div class="chips" id="scrMethods">
+      <label><input type="checkbox" id="scrLiquid" checked><span>Com liquidez</span></label>
       <label><input type="checkbox" value="graham"><span>Graham</span></label>
       <label><input type="checkbox" value="bazin"><span>Bazin</span></label>
-      <label><input type="checkbox" value="fcd"><span>FCD</span></label>
-      <label><input type="checkbox" id="scrHideExtreme"><span>Sem extremos</span></label>
     </div>
+    <details class="adv" id="scrAdv">
+      <summary>Busca avançada <span id="advCount"></span></summary>
+      <div class="adv-g">
+        <label>Lucro subindo<select id="fProfit"><option value="">qualquer</option><option value="2">2+ anos seguidos</option><option value="3">3+ anos seguidos</option><option value="4">4+ anos seguidos</option><option value="5">5 anos seguidos</option></select></label>
+        <label>Receita subindo<select id="fRev"><option value="">qualquer</option><option value="2">2+ anos seguidos</option><option value="3">3+ anos seguidos</option><option value="4">4+ anos seguidos</option><option value="5">5 anos seguidos</option></select></label>
+        <label>ROE mínimo<select id="fRoe"><option value="">qualquer</option><option value="10">10%</option><option value="15">15%</option><option value="20">20%</option><option value="25">25%</option></select></label>
+        <label>P/L máximo<select id="fPe"><option value="">qualquer</option><option value="5">5</option><option value="8">8</option><option value="10">10</option><option value="15">15</option><option value="20">20</option></select></label>
+        <label>Dividend yield mínimo<select id="fDy"><option value="">qualquer</option><option value="4">4%</option><option value="6">6%</option><option value="8">8%</option><option value="10">10%</option></select></label>
+        <label>Margem líquida mínima<select id="fMargin"><option value="">qualquer</option><option value="5">5%</option><option value="10">10%</option><option value="15">15%</option><option value="20">20%</option></select></label>
+        <label>Dívida líq./patrimônio<select id="fDebt"><option value="">qualquer</option><option value="0">sem dívida líquida</option><option value="0.5">até 0,5</option><option value="1">até 1</option><option value="2">até 2</option></select></label>
+        <label class="chk"><input type="checkbox" id="fNoLoss"> Sem prejuízo nos últimos 5 anos</label>
+      </div>
+      <button type="button" id="advClear" class="btn ghost small-btn">Limpar filtros</button>
+    </details>
     <div class="scr-meta" id="scrMeta"></div>
     <section id="scrList" class="list"></section>
-    <p class="disclaimer">Valores justos estimados por Graham, Bazin e FCD para as ações do Ibovespa, atualizados todo dia útil pelo projeto aberto
-      <a href="https://github.com/gustavocduarte/avaliador-acoes-b3" target="_blank" rel="noopener">Avaliador de Ações da B3</a> (licença MIT).
-      São estimativas de modelos para estudo, <b>não recomendação de investimento</b>.</p>
+    <p class="disclaimer">Lucro, receita, patrimônio, dívida e dividendos das demonstrações anuais entregues à
+      <a href="https://dados.cvm.gov.br/dataset/cia_aberta-doc-dfp" target="_blank" rel="noopener">CVM (dados abertos)</a>;
+      cotações de fechamento da brapi.dev. Atualizado todo dia útil. "Com liquidez" = mais de R$ 1 milhão negociado no dia.
+      Valor justo por Graham e Bazin é estimativa para estudo, <b>não recomendação de investimento</b>.</p>
   </main>
 
   <button id="btnAdd" class="fab" aria-label="Nova operação">+</button>

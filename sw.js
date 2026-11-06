@@ -1,5 +1,5 @@
 // Cache do app (funciona offline); cotações sempre pela rede.
-const CACHE = 'carteira-v5';
+const CACHE = 'carteira-v6';
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest', 'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {

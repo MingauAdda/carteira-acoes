@@ -1,0 +1,36 @@
+name: Screener (CVM)
+
+# Baixa os balanços oficiais da CVM e as cotações, e grava data/screener.json.
+# O app só lê esse arquivo pronto.
+on:
+  schedule:
+    - cron: "30 22 * * 1-5"   # 19h30 de Brasília, depois do fechamento
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: screener
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Gerar screener
+        run: python -I scripts/build_screener.py data/screener.json
+      - name: Salvar se mudou
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/screener.json
+          git diff --cached --quiet && { echo "Sem mudanças"; exit 0; }
+          git commit -m "Atualiza screener (CVM + cotações)"
+          git pull --rebase
+          git push
