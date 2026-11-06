@@ -64,6 +64,7 @@ async function syncBackupStore() {
   }
   if (restored) {
     txs = load(KEY_TX, []); classes = load(KEY_CLASSES, {}); token = load(KEY_TOKEN, '');
+    mergeFractional();
     render(); refreshQuotes();
     toast('Dados recuperados');
   }
@@ -74,11 +75,22 @@ async function syncBackupStore() {
 // Operações: {id, type: buy|sell|split|income, ticker, qty, price, fees, date, amount?, kind?, broker?, key?}
 //  - split: qty com sinal (desdobro/bonificação +, grupamento −), custo total não muda
 //  - income: provento recebido (amount em R$; kind = Dividendo/JCP/Rendimento)
+// Fracionário (VALE3F) = mesma ação do lote padrão (VALE3)
+const normTicker = (t) => String(t || '').trim().toUpperCase().replace(/\.SA$/, '').replace(/^([A-Z0-9]{4}\d{1,2})F$/, '$1');
+function mergeFractional() {
+  let changed = false;
+  for (const t of txs) { const n = normTicker(t.ticker); if (n !== t.ticker) { t.ticker = n; changed = true; } }
+  if (changed) save(KEY_TX, txs);
+  let cc = false;
+  for (const k of Object.keys(classes)) { const n = normTicker(k); if (n !== k) { if (!classes[n]) classes[n] = classes[k]; delete classes[k]; cc = true; } }
+  if (cc) save(KEY_CLASSES, classes);
+}
 let txs = load(KEY_TX, []);
 let quotes = load(KEY_QUOTES, {});
 let token = load(KEY_TOKEN, '');
 let screener = load(KEY_SCREENER, null); // {fetchedAt, rodada, rows: {TICKER: {...}}}
 let classes = load(KEY_CLASSES, {});    // {TICKER: 'acao'|'fii'|'etf'|'bdr'|'outro'}
+mergeFractional();
 
 // =====================================================================
 // Formatação
@@ -361,8 +373,6 @@ function render() {
   $('#sumValue').textContent = money(value);
   $('#sumCost').textContent = money(cost);
   $('#sumPL').innerHTML = priced ? `<span class="${cls(pl)}">${signed(pl)}<br><small>${cost ? pct(pl / cost * 100) : ''}</small></span>` : '—';
-  const prevValue = value - day;
-  $('#sumDay').innerHTML = priced ? `<span class="${cls(day)}">${signed(day)}<br><small>${prevValue ? pct(day / prevValue * 100) : ''}</small></span>` : '—';
 
   const times = open.map((p) => p.quote && p.quote.fetchedAt).filter(Boolean);
   $('#updated').textContent = times.length
@@ -716,7 +726,7 @@ function setTxMode(type) {
 let clsTouched = false;
 function syncClassPick() {
   if (clsTouched) return;
-  const t = $('#formTx').ticker.value.trim().toUpperCase();
+  const t = normTicker($('#formTx').ticker.value);
   const c = t ? classOf(t) : 'acao';
   $('#formTx').querySelector(`input[name=cls][value=${c}]`).checked = true;
 }
@@ -725,7 +735,7 @@ function updateTxHint() {
   const f = $('#formTx');
   const type = f.type.value;
   if (type === 'income') { $('#txHint').textContent = ''; return; }
-  const t = f.ticker.value.trim().toUpperCase();
+  const t = normTicker(f.ticker.value);
   const p = positions().find((x) => x.ticker === t);
   const qty = parseNum(f.qty.value), price = parseNum(f.price.value), fees = parseNum(f.fees.value);
   if (!p || !p.qty) { $('#txHint').textContent = qty && price ? `Total: ${money(qty * price + (type === 'buy' ? fees : -fees))}` : ''; return; }
@@ -1054,7 +1064,7 @@ $('#advClear').onclick = () => { document.querySelectorAll('#scrAdv select').for
 $('#formTx').addEventListener('submit', (e) => {
   e.preventDefault();
   const f = e.target;
-  const ticker = f.ticker.value.trim().toUpperCase().replace(/\.SA$/, '');
+  const ticker = normTicker(f.ticker.value);
   const type = f.type.value;
   if (!/^[A-Z0-9]{4,8}$/.test(ticker)) return toast('Código inválido (ex.: PETR4)');
   if (type === 'income') {
@@ -1125,7 +1135,7 @@ $('#fileImport').onchange = async (e) => {
       (t.type === 'income' ? t.amount > 0 : t.type === 'split' ? t.qty : t.qty > 0 && t.price > 0));
     if (!confirm(`Importar ${clean.length} operações? Isso substitui as ${txs.length} atuais.`)) return;
     txs = clean.map((t, i) => ({
-      id: t.id || Date.now() + i, type: t.type, ticker: String(t.ticker).toUpperCase(),
+      id: t.id || Date.now() + i, type: t.type, ticker: normTicker(t.ticker),
       qty: +t.qty || 0, price: +t.price || 0, fees: +t.fees || 0, date: t.date,
       ...(t.amount ? { amount: +t.amount } : {}), ...(t.kind ? { kind: t.kind } : {}),
       ...(t.broker ? { broker: t.broker } : {}), ...(t.key ? { key: t.key } : {}),
@@ -1135,6 +1145,7 @@ $('#fileImport').onchange = async (e) => {
       classes = Object.fromEntries(Object.entries(j.classes).filter(([, c]) => CLASSES[c]));
       save(KEY_CLASSES, classes);
     }
+    mergeFractional();
     $('#dlgSettings').close();
     render(); refreshQuotes();
     toast('Backup importado');

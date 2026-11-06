@@ -45,7 +45,7 @@ main { padding: 8px 16px; max-width: 640px; margin: 0 auto; }
 }
 .label { color: var(--muted); font-size: 13px; }
 .big { font-size: 34px; font-weight: 700; letter-spacing: -0.5px; margin: 2px 0 12px; }
-.summary .row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; font-weight: 600; font-size: 15px; }
+.summary .row { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; font-weight: 600; font-size: 15px; }
 .updated { color: var(--muted); font-size: 12px; margin-top: 12px; }
 
 .up { color: var(--up); }
