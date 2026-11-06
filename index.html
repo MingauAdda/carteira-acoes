@@ -16,14 +16,15 @@
 </head>
 <body>
   <header class="top">
-    <h1>Carteira</h1>
+    <h1 id="pageTitle">Carteira</h1>
     <div class="top-actions">
       <button id="btnRefresh" class="icon-btn" aria-label="Atualizar cotações">⟳</button>
       <button id="btnSettings" class="icon-btn" aria-label="Ajustes">⚙</button>
     </div>
   </header>
 
-  <main>
+  <!-- Aba Carteira -->
+  <main id="tabCarteira">
     <section class="summary" id="summary">
       <div class="label">Patrimônio</div>
       <div class="big" id="sumValue">R$ 0,00</div>
@@ -40,33 +41,87 @@
     </div>
 
     <section id="list" class="list"></section>
-    <p id="empty" class="empty hidden">Nenhuma ação ainda.<br>Toque em <b>+</b> para registrar uma compra.</p>
+    <p id="empty" class="empty hidden">Nenhuma ação ainda.<br>Toque em <b>+</b> para registrar uma compra<br>ou <a href="#" id="emptyImport">importe as planilhas da B3</a>.</p>
+
+    <section id="insights" class="hidden">
+      <h2 class="sec">Resultado</h2>
+      <div class="card" id="result"></div>
+      <h2 class="sec">Valor justo da carteira</h2>
+      <div class="card" id="scenarios"></div>
+      <h2 class="sec">Composição</h2>
+      <div class="seg small" id="compSeg">
+        <label><input type="radio" name="comp" value="acao" checked><span>Por ação</span></label>
+        <label><input type="radio" name="comp" value="setor"><span>Por setor</span></label>
+      </div>
+      <div class="card" id="composition"></div>
+    </section>
+  </main>
+
+  <!-- Aba Screener -->
+  <main id="tabScreener" class="hidden">
+    <input id="scrSearch" class="search" type="search" placeholder="Buscar código ou setor" autocomplete="off" autocapitalize="characters">
+    <div class="filters">
+      <select id="scrSector" aria-label="Setor"><option value="">Todos os setores</option></select>
+      <select id="scrSort" aria-label="Ordenar">
+        <option value="pot">Maior potencial</option>
+        <option value="potAsc">Menor potencial</option>
+        <option value="tk">Código A–Z</option>
+        <option value="div">Menor divergência</option>
+      </select>
+    </div>
+    <div class="chips" id="scrMethods">
+      <label><input type="checkbox" value="graham"><span>Graham</span></label>
+      <label><input type="checkbox" value="bazin"><span>Bazin</span></label>
+      <label><input type="checkbox" value="fcd"><span>FCD</span></label>
+      <label><input type="checkbox" id="scrHideExtreme"><span>Sem extremos</span></label>
+    </div>
+    <div class="scr-meta" id="scrMeta"></div>
+    <section id="scrList" class="list"></section>
+    <p class="disclaimer">Valores justos estimados por Graham, Bazin e FCD para as ações do Ibovespa, atualizados todo dia útil pelo projeto aberto
+      <a href="https://github.com/gustavocduarte/avaliador-acoes-b3" target="_blank" rel="noopener">Avaliador de Ações da B3</a> (licença MIT).
+      São estimativas de modelos para estudo, <b>não recomendação de investimento</b>.</p>
   </main>
 
   <button id="btnAdd" class="fab" aria-label="Nova operação">+</button>
+
+  <nav class="tabbar">
+    <button data-tab="Carteira" class="on"><span>◔</span>Carteira</button>
+    <button data-tab="Screener"><span>☰</span>Screener</button>
+  </nav>
 
   <!-- Nova operação -->
   <dialog id="dlgTx" class="sheet">
     <form id="formTx" method="dialog">
       <h2 id="txTitle">Nova operação</h2>
-      <div class="seg">
+      <div class="quick">
+        <input id="quick" autocomplete="off" placeholder="Escreva: comprei 100 petr4 a 32,50 ontem" enterkeyhint="done">
+        <button type="button" id="btnQuick" class="btn primary">OK</button>
+      </div>
+      <div class="seg three">
         <label><input type="radio" name="type" value="buy" checked><span>Compra</span></label>
         <label><input type="radio" name="type" value="sell"><span>Venda</span></label>
+        <label><input type="radio" name="type" value="income"><span>Provento</span></label>
       </div>
       <label class="field">Código
         <input name="ticker" id="txTicker" required autocapitalize="characters" autocomplete="off" placeholder="PETR4" list="tickerList">
         <datalist id="tickerList"></datalist>
       </label>
       <div class="two">
-        <label class="field">Quantidade
+        <label class="field" id="fQty">Quantidade
           <input name="qty" type="number" inputmode="decimal" step="any" min="0" required placeholder="100">
         </label>
-        <label class="field">Preço (R$)
+        <label class="field" id="fPrice">Preço (R$)
           <input name="price" type="text" inputmode="decimal" required placeholder="32,50">
+        </label>
+        <label class="field hidden" id="fAmount">Valor recebido (R$)
+          <input name="amount" type="text" inputmode="decimal" placeholder="12,40">
+        </label>
+        <label class="field hidden" id="fKind">Tipo
+          <select name="kind"><option>Dividendo</option><option>JCP</option><option>Rendimento</option><option>Juros</option></select>
         </label>
       </div>
       <div class="two">
-        <label class="field">Taxas (R$)
+        <label class="field" id="fFees">Taxas (R$)
           <input name="fees" type="text" inputmode="decimal" placeholder="0,00">
         </label>
         <label class="field">Data
@@ -81,7 +136,7 @@
     </form>
   </dialog>
 
-  <!-- Detalhe da ação -->
+  <!-- Detalhe / análise da ação -->
   <dialog id="dlgPos" class="sheet">
     <div id="posBody"></div>
     <div class="actions">
@@ -99,6 +154,7 @@
       </label>
       <p class="hint">Grátis: crie conta em <a href="https://brapi.dev" target="_blank" rel="noopener">brapi.dev</a> → Dashboard → copie o token. Cotações com atraso.</p>
       <div class="actions wrap">
+        <button type="button" class="btn ghost full" id="btnOpenImport">Importar planilhas da B3</button>
         <button type="button" class="btn ghost" id="btnExport">Exportar backup</button>
         <label class="btn ghost file">Importar backup<input type="file" id="fileImport" accept="application/json,.json"></label>
       </div>
@@ -107,6 +163,23 @@
         <button type="submit" class="btn primary">Salvar</button>
       </div>
     </form>
+  </dialog>
+
+  <!-- Importar B3 -->
+  <dialog id="dlgImport" class="sheet">
+    <h2>Importar da B3</h2>
+    <ol class="steps">
+      <li>Entre na <b>Área do Investidor</b> da B3 (investidor.b3.com.br).</li>
+      <li>Em <b>Extratos</b>, baixe em Excel a aba <b>Negociação</b> (compras e vendas) e, se quiser os proventos, a <b>Movimentação</b>.</li>
+      <li>Escolha os arquivos abaixo. Nada é gravado antes de você conferir.</li>
+    </ol>
+    <label class="btn ghost file full">Escolher planilhas (.xlsx / .csv)<input type="file" id="impFiles" multiple accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv"></label>
+    <div id="impPreview" class="imp"></div>
+    <p class="hint">Importar o mesmo arquivo de novo não duplica nada. A B3 não traz corretagem: ajuste as taxas na operação se quiser.</p>
+    <div class="actions">
+      <button type="button" class="btn ghost" data-close>Cancelar</button>
+      <button type="button" class="btn primary" id="btnDoImport" disabled>Importar</button>
+    </div>
   </dialog>
 
   <div id="toast" class="toast hidden"></div>

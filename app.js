@@ -1,9 +1,13 @@
 'use strict';
 
-// ---------- Armazenamento ----------
+// =====================================================================
+// Armazenamento
+// =====================================================================
 const KEY_TX = 'carteira.tx.v1';
 const KEY_QUOTES = 'carteira.quotes.v1';
 const KEY_TOKEN = 'carteira.token';
+const KEY_SCREENER = 'carteira.screener.v1';
+const KEY_CDI = 'carteira.cdi.v1';
 
 function load(key, fallback) {
   try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; }
@@ -13,18 +17,27 @@ function save(key, value) {
   try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
 }
 
-let txs = load(KEY_TX, []);          // [{id,type,ticker,qty,price,fees,date}]
-let quotes = load(KEY_QUOTES, {});   // {TICKER: {price, change, changePct, time, name, logo, fetchedAt}}
+// Operações: {id, type: buy|sell|split|income, ticker, qty, price, fees, date, amount?, kind?, broker?, key?}
+//  - split: qty com sinal (desdobro/bonificação +, grupamento −), custo total não muda
+//  - income: provento recebido (amount em R$; kind = Dividendo/JCP/Rendimento)
+let txs = load(KEY_TX, []);
+let quotes = load(KEY_QUOTES, {});
 let token = load(KEY_TOKEN, '');
+let screener = load(KEY_SCREENER, null); // {fetchedAt, rodada, rows: {TICKER: {...}}}
+let cdiCache = load(KEY_CDI, null);      // {fetchedAt, from, series: [[iso, pctDia], ...]}
 
-// ---------- Formatação ----------
+// =====================================================================
+// Formatação
+// =====================================================================
 const brl = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
 const num = new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 8 });
 const pct = (v) => (v > 0 ? '+' : '') + v.toFixed(2).replace('.', ',') + '%';
+const pct0 = (v) => v.toFixed(1).replace('.', ',') + '%';
 const money = (v) => brl.format(v);
 const signed = (v) => (v > 0 ? '+' : '') + brl.format(v);
 const cls = (v) => (v > 0.0001 ? 'up' : v < -0.0001 ? 'down' : '');
 const parseNum = (s) => {
+  if (typeof s === 'number') return isFinite(s) ? s : 0;
   if (s == null) return 0;
   s = String(s).trim().replace(/\s|R\$/g, '');
   if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');
@@ -32,26 +45,37 @@ const parseNum = (s) => {
   return isFinite(n) ? n : 0;
 };
 const fmtDate = (iso) => { const [y, m, d] = iso.split('-'); return `${d}/${m}/${y}`; };
-const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const todayIso = () => new Date().toLocaleDateString('sv-SE');
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const norm = (s) => String(s ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+const $ = (s) => document.querySelector(s);
 
-// ---------- Cálculo de posição (preço médio) ----------
-// Compra: custo += qtd*preço + taxas; PM = custo / qtd.
-// Venda: não altera o PM; lucro realizado = qtd*(preço - PM) - taxas.
+// =====================================================================
+// Posições: preço médio, lucro realizado, proventos
+// =====================================================================
+const TYPE_ORDER = { buy: 0, split: 1, sell: 2, income: 3 };
+function sortedTxs() {
+  return [...txs].sort((a, b) => a.date.localeCompare(b.date) || TYPE_ORDER[a.type] - TYPE_ORDER[b.type] || a.id - b.id);
+}
+
 function positions() {
   const map = {};
-  const sorted = [...txs].sort((a, b) => a.date.localeCompare(b.date) || a.id - b.id);
-  for (const t of sorted) {
-    const p = map[t.ticker] ||= { ticker: t.ticker, qty: 0, cost: 0, realized: 0, txs: [] };
+  for (const t of sortedTxs()) {
+    const p = map[t.ticker] ||= { ticker: t.ticker, qty: 0, cost: 0, realized: 0, income: 0, txs: [] };
     p.txs.push(t);
     if (t.type === 'buy') {
       p.cost += t.qty * t.price + (t.fees || 0);
       p.qty += t.qty;
-    } else {
+    } else if (t.type === 'sell') {
       const avg = p.qty > 0 ? p.cost / p.qty : 0;
       const q = Math.min(t.qty, p.qty);
       p.realized += q * (t.price - avg) - (t.fees || 0);
       p.qty -= q;
       p.cost = avg * p.qty;
+    } else if (t.type === 'split') {
+      p.qty = Math.max(0, p.qty + t.qty); // custo total igual → PM se ajusta
+    } else if (t.type === 'income') {
+      p.income += t.amount || 0;
     }
     if (p.qty < 1e-9) { p.qty = 0; p.cost = 0; }
   }
@@ -59,6 +83,7 @@ function positions() {
     p.avg = p.qty > 0 ? p.cost / p.qty : 0;
     const q = quotes[p.ticker];
     p.quote = q;
+    p.val = valuation(p.ticker);
     if (q && p.qty > 0) {
       p.value = p.qty * q.price;
       p.pl = p.value - p.cost;
@@ -69,14 +94,25 @@ function positions() {
   });
 }
 
-// ---------- Cotações (brapi.dev) ----------
-async function fetchQuote(ticker) {
-  const url = `https://brapi.dev/api/quote/${encodeURIComponent(ticker)}` + (token ? `?token=${encodeURIComponent(token)}` : '');
-  const r = await fetch(url);
+// =====================================================================
+// Cotações e histórico (brapi.dev)
+// =====================================================================
+function brapiUrl(ticker, params = {}) {
+  const u = new URL(`https://brapi.dev/api/quote/${encodeURIComponent(ticker)}`);
+  for (const [k, v] of Object.entries(params)) u.searchParams.set(k, v);
+  if (token) u.searchParams.set('token', token);
+  return u.toString();
+}
+async function brapi(ticker, params) {
+  const r = await fetch(brapiUrl(ticker, params));
   const j = await r.json().catch(() => ({}));
   if (!r.ok || j.error) throw new Error(j.message || `HTTP ${r.status}`);
   const q = j.results && j.results[0];
-  if (!q || q.regularMarketPrice == null) throw new Error('sem cotação');
+  if (!q) throw new Error('sem dados');
+  return q;
+}
+function toQuote(q, ticker) {
+  if (q.regularMarketPrice == null) throw new Error('sem cotação');
   return {
     price: q.regularMarketPrice,
     change: q.regularMarketChange || 0,
@@ -97,7 +133,7 @@ async function refreshQuotes(manual = false) {
   $('#btnRefresh').classList.add('spin');
   const errors = [];
   await Promise.all(tickers.map(async (t) => {
-    try { quotes[t] = await fetchQuote(t); }
+    try { quotes[t] = toQuote(await brapi(t), t); }
     catch (e) { errors.push(`${t}: ${e.message}`); }
   }));
   save(KEY_QUOTES, quotes);
@@ -107,9 +143,148 @@ async function refreshQuotes(manual = false) {
   if (errors.length && (manual || !token)) toast(errors[0] + (errors.length > 1 ? ` (+${errors.length - 1})` : ''));
 }
 
-// ---------- UI ----------
-const $ = (s) => document.querySelector(s);
+const histCache = {};
+async function fetchHistory(ticker) {
+  if (histCache[ticker] && Date.now() - histCache[ticker].at < 30 * 60_000) return histCache[ticker];
+  let q = null;
+  for (const range of ['1y', '6mo', '3mo']) {
+    try { q = await brapi(ticker, { range, interval: '1d', dividends: 'true' }); if (q.historicalDataPrice?.length) break; }
+    catch { q = null; }
+  }
+  if (!q) throw new Error('sem histórico');
+  try { quotes[ticker] = toQuote(q, ticker); save(KEY_QUOTES, quotes); } catch {}
+  const prices = (q.historicalDataPrice || []).filter((h) => h.close != null).map((h) => ({ t: h.date * 1000, c: h.close }));
+  const divs = (q.dividendsData?.cashDividends || []).map((d) => ({
+    rate: d.rate, label: d.label || 'Provento',
+    com: (d.lastDatePrior || d.exDate || '').slice(0, 10),
+    pay: (d.paymentDate || '').slice(0, 10),
+  })).filter((d) => d.com && d.rate > 0);
+  return (histCache[ticker] = { at: Date.now(), prices, divs });
+}
 
+// =====================================================================
+// Avaliação (screener do projeto Avaliador de Ações da B3, MIT)
+// =====================================================================
+const SCREENER_BASE = 'https://raw.githubusercontent.com/gustavocduarte/avaliador-acoes-b3/master/data/processed/';
+
+function parseCSV(text) {
+  const rows = []; let row = [], f = '', q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) {
+      if (c === '"') { if (text[i + 1] === '"') { f += '"'; i++; } else q = false; }
+      else f += c;
+    } else if (c === '"') q = true;
+    else if (c === ',') { row.push(f); f = ''; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(f); rows.push(row); row = []; f = '';
+    } else f += c;
+  }
+  if (f || row.length) { row.push(f); rows.push(row); }
+  const [head, ...body] = rows.filter((r) => r.length > 1);
+  return body.map((r) => Object.fromEntries(head.map((h, i) => [h, r[i] ?? ''])));
+}
+
+async function loadScreener(force = false) {
+  if (!force && screener && Date.now() - screener.fetchedAt < 6 * 3600_000) return;
+  try {
+    const [csv, rod] = await Promise.all([
+      fetch(SCREENER_BASE + 'screener.csv', { cache: 'no-cache' }).then((r) => { if (!r.ok) throw new Error(r.status); return r.text(); }),
+      fetch(SCREENER_BASE + 'rodada.json', { cache: 'no-cache' }).then((r) => r.json()).catch(() => ({})),
+    ]);
+    const f = (v) => { const n = parseFloat(v); return isFinite(n) && n > 0 ? n : null; };
+    const rows = {};
+    for (const r of parseCSV(csv)) {
+      if (!r.ticker || r.sucesso !== 'True') continue;
+      rows[r.ticker] = {
+        price: f(r.preco_atual),
+        combined: f(r.valor_combinado),
+        graham: f(r.graham_valor_justo),
+        bazin: f(r.bazin_preco_teto),
+        fcd: f(r.fcd_valor_justo),
+        divergence: parseFloat(r.divergencia_percentual_metodos),
+        reinvest: parseFloat(r.proporcao_reinvestimento_percentual),
+        divRatio: parseFloat(r.bazin_razao_dividendos_percentual),
+        beta: parseFloat(r.beta_utilizado),
+        warning: r.aviso_desconto_extremo || '',
+        sector: r.segmento_setorial || 'Sem setor',
+      };
+    }
+    if (!Object.keys(rows).length) throw new Error('vazio');
+    screener = { fetchedAt: Date.now(), rodada: rod.data_rodada || '', rows };
+    save(KEY_SCREENER, screener);
+    render();
+    renderScreener();
+  } catch (e) {
+    if (force) toast('Não foi possível baixar as avaliações');
+  }
+}
+
+// Avaliação de uma ação com o preço mais recente que tivermos
+function valuation(ticker) {
+  const s = screener?.rows[ticker];
+  if (!s) return null;
+  const price = quotes[ticker]?.price || s.price;
+  const methods = [['Graham', s.graham], ['Bazin', s.bazin], ['FCD', s.fcd]].filter(([, v]) => v);
+  const vals = methods.map(([, v]) => v);
+  return {
+    ...s, price, methods,
+    min: vals.length ? Math.min(...vals) : null,
+    max: vals.length ? Math.max(...vals) : null,
+    potential: s.combined && price ? (s.combined / price - 1) * 100 : null,
+  };
+}
+
+// =====================================================================
+// CDI (Banco Central, série 12) — "e se esse dinheiro estivesse no CDI?"
+// =====================================================================
+async function loadCDI() {
+  const flows = txs.filter((t) => t.type !== 'split');
+  if (!flows.length) return;
+  let from = flows.reduce((m, t) => (t.date < m ? t.date : m), todayIso());
+  const tenY = new Date(); tenY.setFullYear(tenY.getFullYear() - 10); tenY.setDate(tenY.getDate() + 2);
+  if (from < tenY.toLocaleDateString('sv-SE')) from = tenY.toLocaleDateString('sv-SE');
+  if (cdiCache && cdiCache.from <= from && Date.now() - cdiCache.fetchedAt < 12 * 3600_000) return;
+  const br = (iso) => fmtDate(iso);
+  try {
+    const url = `https://api.bcb.gov.br/dados/serie/bcdata.sgs.12/dados?formato=json&dataInicial=${br(from)}&dataFinal=${br(todayIso())}`;
+    const j = await fetch(url).then((r) => r.json());
+    if (!Array.isArray(j)) throw new Error();
+    const series = j.map((d) => { const [dd, mm, yy] = d.data.split('/'); return [`${yy}-${mm}-${dd}`, parseFloat(d.valor)]; });
+    cdiCache = { fetchedAt: Date.now(), from, series };
+    save(KEY_CDI, cdiCache);
+    render();
+  } catch {}
+}
+
+// Fator acumulado do CDI de `iso` até hoje
+function cdiFactor(iso) {
+  if (!cdiCache) return null;
+  let f = 1;
+  for (const [d, v] of cdiCache.series) if (d >= iso) f *= 1 + v / 100;
+  return f;
+}
+
+// Compara a carteira com o CDI: cada compra vira aplicação, cada venda/provento vira resgate
+function cdiCompare(ps) {
+  if (!cdiCache) return null;
+  let cdi = 0;
+  for (const t of txs) {
+    const f = cdiFactor(t.date < cdiCache.from ? cdiCache.from : t.date);
+    if (t.type === 'buy') cdi += (t.qty * t.price + (t.fees || 0)) * f;
+    else if (t.type === 'sell') cdi -= (t.qty * t.price - (t.fees || 0)) * f;
+    else if (t.type === 'income') cdi -= (t.amount || 0) * f;
+  }
+  const open = ps.filter((p) => p.qty > 0);
+  if (open.some((p) => !p.quote)) return null;
+  const real = open.reduce((s, p) => s + p.value, 0);
+  return { cdi, real };
+}
+
+// =====================================================================
+// Render — aba Carteira
+// =====================================================================
 function render() {
   const ps = positions();
   const open = ps.filter((p) => p.qty > 0).sort((a, b) => (b.value ?? b.cost) - (a.value ?? a.cost));
@@ -137,70 +312,316 @@ function render() {
 
   $('#list').innerHTML = open.map((p) => {
     const q = p.quote;
-    const logo = q && q.logo ? `<img src="${esc(q.logo)}" alt="" loading="lazy" onerror="this.remove()">` : esc(p.ticker.slice(0, 4));
     const right = q
       ? `<div class="v">${money(p.value)}</div><div class="p ${cls(p.pl)}">${signed(p.pl)} (${pct(p.plPct)})</div>`
       : `<div class="v">${money(p.cost)}</div><div class="p">sem cotação</div>`;
     const dayChip = q ? `<span class="chip ${cls(q.changePct)}">${pct(q.changePct)}</span>` : '';
     return `<button class="pos" data-t="${esc(p.ticker)}">
-      <div class="logo">${logo}</div>
+      ${logoHtml(p.ticker)}
       <div><div class="t">${esc(p.ticker)}${dayChip}</div>
         <div class="s">${num.format(p.qty)} × PM ${money(p.avg)}${q ? ` · ${money(q.price)}` : ''}</div></div>
       <div class="r">${right}</div>
     </button>`;
   }).join('');
 
-  $('#tickerList').innerHTML = ps.map((p) => `<option value="${esc(p.ticker)}">`).join('');
+  $('#tickerList').innerHTML = [...new Set([...ps.map((p) => p.ticker), ...Object.keys(screener?.rows || {})])]
+    .map((t) => `<option value="${esc(t)}">`).join('');
+
+  renderInsights(ps, open, value, cost);
 }
 
-function openPosition(ticker) {
-  const p = positions().find((x) => x.ticker === ticker);
-  if (!p) return;
-  const q = p.quote;
-  const logo = q && q.logo ? `<img src="${esc(q.logo)}" alt="" onerror="this.remove()">` : esc(ticker.slice(0, 4));
-  const cell = (l, v, c = '') => `<div class="cell"><div class="label">${l}</div><div class="v ${c}">${v}</div></div>`;
-  $('#posBody').innerHTML = `
-    <div class="det-head"><div class="logo">${logo}</div>
-      <div><div class="t">${esc(ticker)}</div><div class="s">${q ? esc(q.name) : ''}</div></div></div>
-    <div class="grid">
-      ${cell('Quantidade', num.format(p.qty))}
-      ${cell('Preço médio', money(p.avg))}
-      ${cell('Cotação', q ? money(q.price) : '—')}
-      ${cell('Hoje', q ? pct(q.changePct) : '—', q ? cls(q.changePct) : '')}
-      ${cell('Investido', money(p.cost))}
-      ${cell('Valor atual', q ? money(p.value) : '—')}
-      ${cell('Lucro/Prejuízo', q ? `${signed(p.pl)}<br><small>${pct(p.plPct)}</small>` : '—', q ? cls(p.pl) : '')}
-      ${cell('Lucro realizado', signed(p.realized), cls(p.realized))}
-    </div>
-    <div class="txs"><h3>Operações</h3>
-      ${[...p.txs].reverse().map((t) => `<div class="tx">
-        <div><span class="tag ${t.type}">${t.type === 'buy' ? 'COMPRA' : 'VENDA'}</span>${num.format(t.qty)} × ${money(t.price)}
-          <div class="d">${fmtDate(t.date)}${t.fees ? ` · taxas ${money(t.fees)}` : ''}</div></div>
-        <div>${money(t.qty * t.price)}</div>
-        <button class="del" data-del="${t.id}" aria-label="Apagar operação">✕</button>
-      </div>`).join('')}
+function logoHtml(ticker, big = false) {
+  const q = quotes[ticker];
+  const inner = q && q.logo ? `<img src="${esc(q.logo)}" alt="" loading="lazy" onerror="this.remove()">` : esc(ticker.slice(0, 4));
+  return `<div class="logo${big ? ' big' : ''}">${inner}</div>`;
+}
+
+function renderInsights(ps, open, value, cost) {
+  $('#insights').classList.toggle('hidden', !ps.length);
+  if (!ps.length) return;
+
+  // ---- Resultado total + CDI + proventos
+  const realized = ps.reduce((s, p) => s + p.realized, 0);
+  const income = ps.reduce((s, p) => s + p.income, 0);
+  const unreal = value - cost;
+  const total = unreal + realized + income;
+  const cmp = cdiCompare(ps);
+  let html = `<div class="kv"><span>Lucro não realizado</span><b class="${cls(unreal)}">${signed(unreal)}</b></div>
+    <div class="kv"><span>Lucro realizado (vendas)</span><b class="${cls(realized)}">${signed(realized)}</b></div>
+    <div class="kv"><span>Proventos recebidos</span><b class="${cls(income)}">${signed(income)}</b></div>
+    <div class="kv total"><span>Resultado total</span><b class="${cls(total)}">${signed(total)}</b></div>`;
+  if (cmp) {
+    const diff = cmp.real - cmp.cdi;
+    html += `<div class="cdi">
+      <div class="label">E se esse dinheiro estivesse no CDI?</div>
+      <div class="bars2">
+        ${bar2('Carteira hoje', cmp.real, Math.max(cmp.real, cmp.cdi), 'var(--accent)')}
+        ${bar2('No CDI', cmp.cdi, Math.max(cmp.real, cmp.cdi), '#8b93a1')}
+      </div>
+      <div class="note ${cls(diff)}">${diff >= 0 ? 'Carteira à frente do CDI em' : 'Carteira atrás do CDI em'} ${money(Math.abs(diff))}</div>
     </div>`;
+  } else if (txs.length) {
+    html += `<div class="note">Comparação com o CDI aparece quando todas as posições tiverem cotação.</div>`;
+  }
+  $('#result').innerHTML = html;
+
+  // ---- Cenários pelo valor justo (pessimista = menor método, base = combinado, otimista = maior)
+  const evald = open.filter((p) => p.val && p.val.combined);
+  if (evald.length) {
+    let cur = 0, pess = 0, base = 0, otim = 0;
+    for (const p of evald) {
+      cur += p.qty * p.val.price;
+      pess += p.qty * p.val.min; base += p.qty * p.val.combined; otim += p.qty * p.val.max;
+    }
+    const sc = (label, v) => `<div class="sc"><div class="label">${label}</div><div class="v">${money(v)}</div><div class="${cls(v - cur)}">${pct((v / cur - 1) * 100)}</div></div>`;
+    $('#scenarios').innerHTML = `<div class="sc-grid">${sc('Pessimista', pess)}${sc('Base', base)}${sc('Otimista', otim)}</div>
+      <div class="note">${evald.length} de ${open.length} posições avaliadas · valor de mercado delas ${money(cur)}.
+      Potencial sem prazo, não é previsão de retorno.</div>`;
+  } else {
+    $('#scenarios').innerHTML = `<div class="note">${screener ? 'Nenhuma posição está entre as ações do Ibovespa avaliadas.' : 'Carregando avaliações…'}</div>`;
+  }
+
+  // ---- Composição
+  const mode = document.querySelector('input[name=comp]:checked').value;
+  const groups = {};
+  for (const p of open) {
+    const k = mode === 'setor' ? (screener?.rows[p.ticker]?.sector || 'Sem setor') : p.ticker;
+    groups[k] = (groups[k] || 0) + (p.value ?? p.cost);
+  }
+  const tot = Object.values(groups).reduce((a, b) => a + b, 0) || 1;
+  const items = Object.entries(groups).sort((a, b) => b[1] - a[1]);
+  const top = items[0];
+  $('#composition').innerHTML = items.map(([k, v], i) => `<div class="comp">
+      <div class="comp-h"><span>${esc(k)}</span><span>${pct0(v / tot * 100)} · ${money(v)}</span></div>
+      <div class="track"><div style="width:${(v / tot * 100).toFixed(1)}%;background:${PALETTE[i % PALETTE.length]}"></div></div>
+    </div>`).join('') + (top && top[1] / tot > 0.35 && items.length > 1
+      ? `<div class="note warn-t">Concentração: ${esc(top[0])} é ${pct0(top[1] / tot * 100)} da carteira.</div>` : '');
+}
+const PALETTE = ['#3b82f6', '#22c55e', '#f59e0b', '#a855f7', '#ef4444', '#14b8a6', '#ec4899', '#84cc16', '#f97316', '#6366f1'];
+const bar2 = (label, v, max, color) => `<div class="b2"><span>${label}</span><div class="track"><div style="width:${(v / max * 100).toFixed(1)}%;background:${color}"></div></div><b>${money(v)}</b></div>`;
+
+// =====================================================================
+// Render — aba Screener
+// =====================================================================
+function renderScreener() {
+  if (!screener) { $('#scrMeta').textContent = 'Carregando avaliações…'; $('#scrList').innerHTML = ''; return; }
+  const sel = $('#scrSector');
+  if (sel.options.length <= 1) {
+    const sectors = [...new Set(Object.values(screener.rows).map((r) => r.sector))].sort((a, b) => a.localeCompare(b, 'pt-BR'));
+    sel.insertAdjacentHTML('beforeend', sectors.map((s) => `<option>${esc(s)}</option>`).join(''));
+  }
+  const term = norm($('#scrSearch').value);
+  const sector = sel.value;
+  const need = [...document.querySelectorAll('#scrMethods input[value]:checked')].map((i) => i.value);
+  const hideExt = $('#scrHideExtreme').checked;
+  const owned = new Set(positions().filter((p) => p.qty > 0).map((p) => p.ticker));
+
+  let rows = Object.keys(screener.rows).map((t) => ({ ticker: t, ...valuation(t) }))
+    .filter((r) => !term || norm(r.ticker).includes(term) || norm(r.sector).includes(term))
+    .filter((r) => !sector || r.sector === sector)
+    .filter((r) => need.every((m) => r[m]))
+    .filter((r) => !hideExt || !r.warning);
+  const sort = $('#scrSort').value;
+  const potv = (r) => r.potential ?? -Infinity;
+  rows.sort(sort === 'pot' ? (a, b) => potv(b) - potv(a)
+    : sort === 'potAsc' ? (a, b) => (a.potential ?? Infinity) - (b.potential ?? Infinity)
+    : sort === 'div' ? (a, b) => (a.divergence || Infinity) - (b.divergence || Infinity)
+    : (a, b) => a.ticker.localeCompare(b.ticker));
+
+  const withPot = rows.filter((r) => r.potential != null);
+  const above = withPot.filter((r) => r.potential > 0).length;
+  const d = screener.rodada ? new Date(screener.rodada) : null;
+  $('#scrMeta').innerHTML = `${rows.length} ações · ${above} com potencial positivo` +
+    (d && !isNaN(d) ? ` · avaliação de ${d.toLocaleDateString('pt-BR')}` : '');
+
+  $('#scrList').innerHTML = rows.map((r) => {
+    const pot = r.potential;
+    const w = pot == null ? 0 : Math.min(100, Math.abs(pot));
+    return `<button class="scr" data-a="${esc(r.ticker)}">
+      <div class="scr-top">
+        <div><span class="t">${esc(r.ticker)}</span>${owned.has(r.ticker) ? '<span class="chip own">na carteira</span>' : ''}${r.warning ? '<span class="chip warn-c">extremo</span>' : ''}
+          <div class="s">${esc(r.sector)}</div></div>
+        <div class="r"><div class="v ${pot == null ? '' : cls(pot)}">${pot == null ? '—' : pct(pot)}</div>
+          <div class="s">${money(r.price)} → ${r.combined ? money(r.combined) : 's/ valor'}</div></div>
+      </div>
+      <div class="potbar ${pot != null && pot < 0 ? 'neg' : ''}"><div style="width:${w}%"></div></div>
+      <div class="methods">${['graham', 'bazin', 'fcd'].map((m) => `<span class="${r[m] ? 'on' : ''}">${m === 'fcd' ? 'FCD' : m[0].toUpperCase() + m.slice(1)}</span>`).join('')}</div>
+    </button>`;
+  }).join('') || '<p class="empty">Nenhuma ação com esses filtros.</p>';
+}
+
+// =====================================================================
+// Detalhe / análise de uma ação
+// =====================================================================
+async function openAsset(ticker) {
+  const p = positions().find((x) => x.ticker === ticker);
+  drawAsset(ticker, p, null);
   $('#posAddTx').dataset.t = ticker;
   showDialog('#dlgPos');
+  try {
+    const h = await fetchHistory(ticker);
+    if ($('#dlgPos').open && $('#posBody').dataset.t === ticker) drawAsset(ticker, positions().find((x) => x.ticker === ticker), h);
+  } catch {
+    const el = $('#chart'); if (el) el.innerHTML = '<div class="note">Histórico indisponível (confira o token em ⚙).</div>';
+  }
 }
 
+function drawAsset(ticker, p, h) {
+  const q = quotes[ticker];
+  const v = valuation(ticker);
+  const price = q?.price ?? v?.price;
+  const has = p && (p.qty > 0 || p.txs.length);
+  const cell = (l, val, c = '') => `<div class="cell"><div class="label">${l}</div><div class="v ${c}">${val}</div></div>`;
+
+  let html = `<div class="det-head">${logoHtml(ticker, true)}
+      <div><div class="t">${esc(ticker)}</div><div class="s">${esc(q?.name || v?.sector || '')}</div></div>
+      <div class="det-price">${price ? money(price) : ''}${q ? `<div class="${cls(q.changePct)}">${pct(q.changePct)} hoje</div>` : ''}</div></div>
+    <div id="chart" class="chart">${h ? chartSvg(h.prices, p && p.qty > 0 ? p.avg : null) : '<div class="note">Carregando gráfico…</div>'}</div>`;
+
+  if (has) {
+    html += `<div class="grid">
+      ${cell('Quantidade', num.format(p.qty))}
+      ${cell('Preço médio', money(p.avg))}
+      ${cell('Investido', money(p.cost))}
+      ${cell('Valor atual', p.quote ? money(p.value) : '—')}
+      ${cell('Lucro/Prejuízo', p.quote ? `${signed(p.pl)}<br><small>${pct(p.plPct)}</small>` : '—', p.quote ? cls(p.pl) : '')}
+      ${cell('Lucro realizado', signed(p.realized), cls(p.realized))}
+      ${cell('Proventos recebidos', signed(p.income), cls(p.income))}
+      ${cell('Resultado total', signed((p.pl || 0) + p.realized + p.income), cls((p.pl || 0) + p.realized + p.income))}
+    </div>`;
+  }
+
+  // Valor justo
+  if (v) {
+    const scale = Math.max(price || 0, ...v.methods.map(([, x]) => x), v.combined || 0) * 1.05;
+    const row = (label, x, strong) => `<div class="vj ${strong ? 'strong' : ''}"><span>${label}</span>
+      <div class="track"><div style="width:${(x / scale * 100).toFixed(1)}%"></div>${price ? `<i style="left:${(price / scale * 100).toFixed(1)}%"></i>` : ''}</div>
+      <b>${money(x)}</b><em class="${cls(x - price)}">${price ? pct((x / price - 1) * 100) : ''}</em></div>`;
+    html += `<h3 class="sub">Valor justo estimado</h3><div class="card">
+      ${v.combined ? row('Combinado', v.combined, true) : '<div class="note">Nenhum método se aplica a esta ação.</div>'}
+      ${v.methods.map(([m, x]) => row(m, x)).join('')}
+      ${['Graham', 'Bazin', 'FCD'].filter((m) => !v.methods.some(([n]) => n === m)).map((m) => `<div class="vj na"><span>${m}</span><div class="na-t">não se aplica</div></div>`).join('')}
+      <div class="note">Linha branca = preço atual. ${v.methods.length > 1 && isFinite(v.divergence) ? `Divergência entre métodos: ${pct0(v.divergence)}.` : ''}
+        ${isFinite(v.beta) ? ` Beta ${v.beta.toFixed(2).replace('.', ',')}.` : ''}</div>
+      ${v.warning ? `<div class="note warn-t">${esc(v.warning)}</div>` : ''}
+      <details class="how"><summary>Como é calculado</summary>
+        <p><b>Graham:</b> √(22,5 × LPA × VPA); só com lucro e patrimônio positivos.</p>
+        <p><b>Bazin:</b> dividendos dos últimos 12 meses ÷ 6%; só com dividendos em cada um dos últimos 5 anos.</p>
+        <p><b>FCD:</b> fluxo de caixa livre projetado 5 anos e descontado pelo WACC; não se aplica a bancos e seguradoras.</p>
+        <p><b>Combinado:</b> média dos métodos que se aplicam. Fonte: Avaliador de Ações da B3 (MIT). Não é recomendação.</p>
+      </details>
+    </div>`;
+  }
+
+  // Proventos por ação (brapi)
+  if (h && h.divs.length) {
+    const yearAgo = new Date(); yearAgo.setFullYear(yearAgo.getFullYear() - 1);
+    const y0 = yearAgo.toLocaleDateString('sv-SE');
+    const last12 = h.divs.filter((d) => d.com >= y0);
+    const sum12 = last12.reduce((s, d) => s + d.rate, 0);
+    const heldAt = (iso) => p ? qtyAt(p.ticker, iso) : 0;
+    const recent = [...h.divs].sort((a, b) => b.com.localeCompare(a.com)).slice(0, 8);
+    html += `<h3 class="sub">Proventos</h3><div class="card">
+      <div class="kv"><span>Últimos 12 meses (por ação)</span><b>${money(sum12)}</b></div>
+      ${price ? `<div class="kv"><span>Dividend yield 12m</span><b>${pct0(sum12 / price * 100)}</b></div>` : ''}
+      ${recent.map((d) => { const qh = heldAt(d.com); return `<div class="tx">
+        <div><span class="tag income">${esc(d.label)}</span>${money(d.rate)}/ação
+          <div class="d">data com ${fmtDate(d.com)}${d.pay ? ` · paga ${fmtDate(d.pay)}` : ''}</div></div>
+        <div>${qh ? money(qh * d.rate) : ''}</div><div></div></div>`; }).join('')}
+      ${p ? '<div class="note">Valor à direita = estimativa pelo que você tinha na data com (bruto, antes do IR do JCP).</div>' : ''}
+    </div>`;
+  }
+
+  // Operações
+  if (has) {
+    html += `<h3 class="sub">Operações</h3><div class="txs">
+      ${[...p.txs].reverse().map((t) => txRow(t)).join('')}
+    </div>`;
+  }
+  $('#posBody').innerHTML = html;
+  $('#posBody').dataset.t = ticker;
+}
+
+function txRow(t) {
+  const label = { buy: 'COMPRA', sell: 'VENDA', split: t.qty > 0 ? 'EVENTO +' : 'EVENTO −', income: (t.kind || 'PROVENTO').toUpperCase() }[t.type];
+  const main = t.type === 'income' ? money(t.amount)
+    : t.type === 'split' ? `${num.format(Math.abs(t.qty))} ações`
+    : `${num.format(t.qty)} × ${money(t.price)}`;
+  const right = t.type === 'buy' || t.type === 'sell' ? money(t.qty * t.price) : '';
+  return `<div class="tx">
+    <div><span class="tag ${t.type}">${esc(label)}</span>${main}
+      <div class="d">${fmtDate(t.date)}${t.fees ? ` · taxas ${money(t.fees)}` : ''}${t.broker ? ` · ${esc(t.broker)}` : ''}</div></div>
+    <div>${right}</div>
+    <button class="del" data-del="${t.id}" aria-label="Apagar operação">✕</button>
+  </div>`;
+}
+
+function qtyAt(ticker, iso) {
+  let q = 0;
+  for (const t of sortedTxs()) {
+    if (t.ticker !== ticker || t.date > iso) continue;
+    if (t.type === 'buy') q += t.qty;
+    else if (t.type === 'sell') q -= Math.min(q, t.qty);
+    else if (t.type === 'split') q = Math.max(0, q + t.qty);
+  }
+  return q;
+}
+
+function chartSvg(prices, avg) {
+  if (!prices || prices.length < 2) return '<div class="note">Sem histórico.</div>';
+  const W = 340, H = 140, P = 4;
+  const ys = prices.map((p) => p.c).concat(avg ? [avg] : []);
+  const min = Math.min(...ys), max = Math.max(...ys), span = max - min || 1;
+  const x = (i) => P + (i / (prices.length - 1)) * (W - 2 * P);
+  const y = (v) => P + (1 - (v - min) / span) * (H - 2 * P);
+  const d = prices.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(p.c).toFixed(1)}`).join('');
+  const up = prices[prices.length - 1].c >= prices[0].c;
+  const color = up ? 'var(--up)' : 'var(--down)';
+  const chg = (prices[prices.length - 1].c / prices[0].c - 1) * 100;
+  const start = new Date(prices[0].t).toLocaleDateString('pt-BR', { month: 'short', year: '2-digit' });
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Gráfico de preço">
+      <path d="${d} L${x(prices.length - 1)},${H} L${x(0)},${H}Z" fill="${color}" opacity=".12"/>
+      <path d="${d}" fill="none" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke"/>
+      ${avg ? `<line x1="0" x2="${W}" y1="${y(avg)}" y2="${y(avg)}" stroke="#fff" stroke-dasharray="4 4" opacity=".5" vector-effect="non-scaling-stroke"/>` : ''}
+    </svg>
+    <div class="chart-leg"><span>desde ${start}: <b class="${cls(chg)}">${pct(chg)}</b></span>
+      <span>mín ${money(Math.min(...prices.map((p) => p.c)))} · máx ${money(Math.max(...prices.map((p) => p.c)))}</span>
+      ${avg ? '<span>- - - seu preço médio</span>' : ''}</div>`;
+}
+
+// =====================================================================
+// Formulário de operação + lançamento por frase
+// =====================================================================
 function openTxForm(ticker = '') {
   const f = $('#formTx');
   f.reset();
   f.ticker.value = ticker;
-  f.date.value = new Date().toLocaleDateString('sv-SE');
+  f.date.value = todayIso();
   $('#txHint').textContent = '';
+  setTxMode('buy');
   showDialog('#dlgTx');
-  if (!ticker) setTimeout(() => f.ticker.focus(), 50);
-  else setTimeout(() => f.qty.focus(), 50);
+  setTimeout(() => (ticker ? f.qty : $('#quick')).focus(), 50);
+}
+
+function setTxMode(type) {
+  const f = $('#formTx');
+  f.querySelector(`input[name=type][value=${type}]`).checked = true;
+  const inc = type === 'income';
+  $('#fQty').classList.toggle('hidden', inc);
+  $('#fPrice').classList.toggle('hidden', inc);
+  $('#fFees').classList.toggle('hidden', inc);
+  $('#fAmount').classList.toggle('hidden', !inc);
+  $('#fKind').classList.toggle('hidden', !inc);
+  f.qty.required = !inc; f.price.required = !inc; f.amount.required = inc;
 }
 
 function updateTxHint() {
   const f = $('#formTx');
+  const type = f.type.value;
+  if (type === 'income') { $('#txHint').textContent = ''; return; }
   const t = f.ticker.value.trim().toUpperCase();
   const p = positions().find((x) => x.ticker === t);
   const qty = parseNum(f.qty.value), price = parseNum(f.price.value), fees = parseNum(f.fees.value);
-  const type = f.type.value;
   if (!p || !p.qty) { $('#txHint').textContent = qty && price ? `Total: ${money(qty * price + (type === 'buy' ? fees : -fees))}` : ''; return; }
   if (type === 'buy' && qty && price) {
     const newAvg = (p.cost + qty * price + fees) / (p.qty + qty);
@@ -213,60 +634,322 @@ function updateTxHint() {
   }
 }
 
-function showDialog(sel) { const d = $(sel); if (!d.open) d.showModal(); }
+// "comprei 100 petr4 a 32,50 ontem" · "vendi 50 vale3 por 61 dia 03/11" · "recebi 12,40 de dividendos de itsa4"
+function parseQuick(text) {
+  // "1.000" = mil (milhar com ponto); converte antes de usar parseNum
+  const s = norm(text).replace(/r\$\s*/g, '').replace(/\b\d{1,3}(?:\.\d{3})+(?![\d,])/g, (m) => m.replace(/\./g, ''));
+  const out = {};
+  if (/\b(vend|venda)/.test(s)) out.type = 'sell';
+  else if (/\b(receb|provento|dividendo|jcp|juros sobre|rendimento)/.test(s)) out.type = 'income';
+  else if (/\b(compr|compra|adquiri|aport)/.test(s)) out.type = 'buy';
+  const tk = s.match(/\b([a-z]{4}\d{1,2}f?)\b/);
+  if (tk) out.ticker = tk[1].toUpperCase().replace(/^([A-Z]{4}\d{1,2})F$/, '$1');
+  const n = '(\\d{1,3}(?:\\.\\d{3})*(?:,\\d+)?|\\d+(?:[.,]\\d+)?)';
+  if (out.type === 'income') {
+    const m = s.match(new RegExp(`(?:receb\\w*|de)\\s+${n}`)) || s.match(new RegExp(n));
+    if (m) out.amount = parseNum(m[1]);
+    if (/jcp|juros sobre/.test(s)) out.kind = 'JCP'; else if (/rendimento/.test(s)) out.kind = 'Rendimento'; else out.kind = 'Dividendo';
+  } else {
+    const q = s.match(new RegExp(`${n}\\s*(?:acoes|acao|cotas?|papeis)?\\s*(?:de\\s+)?[a-z]{4}\\d`));
+    if (q) out.qty = parseNum(q[1]);
+    const pr = s.match(new RegExp(`(?:\\ba\\b|\\bpor\\b|@|cada|preco)\\s*${n}`));
+    if (pr) out.price = parseNum(pr[1]);
+    const tx = s.match(new RegExp(`(?:taxa|taxas|corretagem)\\s*(?:de\\s*)?${n}`));
+    if (tx) out.fees = parseNum(tx[1]);
+  }
+  const d = new Date();
+  if (/\banteontem\b/.test(s)) { d.setDate(d.getDate() - 2); out.date = d.toLocaleDateString('sv-SE'); }
+  else if (/\bontem\b/.test(s)) { d.setDate(d.getDate() - 1); out.date = d.toLocaleDateString('sv-SE'); }
+  const dm = s.match(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/);
+  if (dm) {
+    let y = dm[3] ? +dm[3] : d.getFullYear(); if (y < 100) y += 2000;
+    out.date = `${y}-${String(dm[2]).padStart(2, '0')}-${String(dm[1]).padStart(2, '0')}`;
+  }
+  return out;
+}
 
+function applyQuick() {
+  const text = $('#quick').value;
+  if (!text.trim()) return;
+  const r = parseQuick(text);
+  const f = $('#formTx');
+  if (r.type) setTxMode(r.type);
+  if (r.ticker) f.ticker.value = r.ticker;
+  if (r.qty) f.qty.value = String(r.qty);
+  if (r.price) f.price.value = String(r.price).replace('.', ',');
+  if (r.fees) f.fees.value = String(r.fees).replace('.', ',');
+  if (r.amount) f.amount.value = String(r.amount).replace('.', ',');
+  if (r.kind) f.kind.value = r.kind;
+  if (r.date) f.date.value = r.date;
+  const missing = [];
+  if (!r.ticker) missing.push('código');
+  if (r.type !== 'income' && !r.qty) missing.push('quantidade');
+  if (r.type !== 'income' && !r.price) missing.push('preço');
+  if (r.type === 'income' && !r.amount) missing.push('valor');
+  updateTxHint();
+  if (missing.length) toast(`Confira: faltou ${missing.join(', ')}`);
+}
+
+// =====================================================================
+// Importar planilhas da B3 (Área do Investidor: Negociação e Movimentação)
+// =====================================================================
+let pendingImport = null;
+
+function loadSheetJS() {
+  if (window.XLSX) return Promise.resolve();
+  return new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+    s.onload = res; s.onerror = () => rej(new Error('Falha ao carregar o leitor de planilhas'));
+    document.head.appendChild(s);
+  });
+}
+
+function cellDate(v) {
+  if (v instanceof Date) { const d = new Date(v.getTime() + 12 * 3600_000); return d.toISOString().slice(0, 10); }
+  const m = String(v ?? '').trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+  const iso = String(v ?? '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return iso ? iso[0] : null;
+}
+const cellNum = (v) => (v === '-' || v === '' || v == null ? 0 : parseNum(v));
+const tickerFromProduct = (p) => { const m = String(p || '').toUpperCase().match(/^\s*([A-Z0-9]{4}\d{1,2}[A-Z]?)\b/); return m ? m[1].replace(/^([A-Z0-9]{4}\d{1,2})F$/, '$1') : null; };
+
+const MOV_INCOME = { 'dividendo': 'Dividendo', 'juros sobre capital proprio': 'JCP', 'rendimento': 'Rendimento', 'juros': 'Juros', 'pagamento de juros': 'Juros' };
+const MOV_IGNORED = {
+  'transferencia - liquidacao': 'Liquidação de compra/venda (vem da planilha de Negociação)',
+  'transferencia': 'Transferência entre corretoras: a posição total não muda',
+  'fracao em ativos': 'Fração de evento (vendida no leilão)',
+  'leilao de fracao': 'Venda de frações de evento',
+  'direito de subscricao': 'Direito de subscrição recebido',
+  'direitos de subscricao - nao exercido': 'Direito de subscrição não exercido',
+  'cessao de direitos': 'Venda de direitos de subscrição',
+  'cessao de direitos - solicitada': 'Venda de direitos de subscrição',
+  'emprestimo': 'Aluguel de ações: a posição continua sua',
+  'cobranca de taxa semestral': 'Taxa de custódia do Tesouro',
+  'atualizacao': 'Atualização de posição pela B3',
+};
+const MOV_MANUAL = {
+  'grupamento': 'Grupamento: lance o evento manualmente (quantidade que saiu)',
+  'direitos de subscricao - exercido': 'Subscrição exercida: lance a compra manualmente',
+  'recibo de subscricao': 'Subscrição: lance a compra manualmente',
+  'subscricao': 'Subscrição: lance a compra manualmente',
+  'incorporacao': 'Incorporação: lance a troca de ativos manualmente',
+  'amortizacao': 'Amortização: não ajusta o preço médio automaticamente',
+  'restituicao de capital': 'Restituição de capital: não ajusta o preço médio automaticamente',
+};
+
+function parseSheetRows(rows) {
+  // Descobre a linha de cabeçalho e o tipo de planilha
+  const out = [];
+  if (!rows.length) return { kind: null, out };
+  const head = Object.keys(rows[0]).map(norm);
+  const pick = (r, ...names) => { for (const k of Object.keys(r)) if (names.includes(norm(k))) return r[k]; return undefined; };
+  const isNeg = head.includes('data do negocio');
+  const isMov = head.includes('movimentacao') && head.includes('entrada/saida');
+  rows.forEach((r, i) => {
+    const line = i + 2;
+    if (isNeg) {
+      const market = norm(pick(r, 'mercado') || 'mercado a vista');
+      const tipo = norm(pick(r, 'tipo de movimentacao'));
+      const code = String(pick(r, 'codigo de negociacao') || '').toUpperCase().trim();
+      if (!code && !tipo) return;
+      if (!['mercado a vista', 'mercado fracionario'].includes(market)) return out.push({ line, ignored: `${pick(r, 'mercado')}: opções, termo e futuros não entram` });
+      if (!['compra', 'venda'].includes(tipo)) return out.push({ line, error: `Tipo desconhecido: ${pick(r, 'tipo de movimentacao')}` });
+      const date = cellDate(pick(r, 'data do negocio'));
+      const qty = cellNum(pick(r, 'quantidade')), price = cellNum(pick(r, 'preco'));
+      if (!date || !code || qty <= 0 || price <= 0) return out.push({ line, error: 'Data, código, quantidade ou preço inválido' });
+      out.push({ line, tx: { type: tipo === 'compra' ? 'buy' : 'sell', ticker: code.replace(/^([A-Z0-9]{4}\d{1,2})F$/, '$1'), qty, price, fees: 0, date, broker: String(pick(r, 'instituicao') || '').trim() } });
+    } else if (isMov) {
+      const label = String(pick(r, 'movimentacao') || '').trim();
+      const kind = norm(label);
+      if (!kind) return;
+      const credit = norm(pick(r, 'entrada/saida')) === 'credito';
+      const date = cellDate(pick(r, 'data'));
+      const ticker = tickerFromProduct(pick(r, 'produto'));
+      const broker = String(pick(r, 'instituicao') || '').trim();
+      if (MOV_IGNORED[kind]) return out.push({ line, ignored: MOV_IGNORED[kind] });
+      if (MOV_MANUAL[kind]) return out.push({ line, error: `${MOV_MANUAL[kind]} (${ticker || pick(r, 'produto')})` });
+      if (MOV_INCOME[kind]) {
+        const amount = cellNum(pick(r, 'valor da operacao'));
+        if (!credit) return out.push({ line, ignored: `${label} a débito` });
+        if (!date || !ticker || amount <= 0) return out.push({ line, error: `${label}: data, ativo ou valor inválido` });
+        return out.push({ line, tx: { type: 'income', ticker, amount, kind: MOV_INCOME[kind], qty: cellNum(pick(r, 'quantidade')), price: 0, fees: 0, date, broker } });
+      }
+      if (kind === 'desdobro' || kind === 'bonificacao em ativos') {
+        const qty = cellNum(pick(r, 'quantidade'));
+        if (!date || !ticker || qty <= 0) return out.push({ line, error: `${label}: dados inválidos` });
+        return out.push({ line, tx: { type: 'split', ticker, qty, price: 0, fees: 0, date, broker, kind: label } });
+      }
+      out.push({ line, ignored: `${label}: tipo não tratado` });
+    }
+  });
+  return { kind: isNeg ? 'Negociação' : isMov ? 'Movimentação' : null, out };
+}
+
+// Chave pelo conteúdo + posição entre linhas iguais: reimportar não duplica
+function txKey(t) {
+  return [t.date, t.type, t.ticker, +(+t.qty || 0).toFixed(6), +(+t.price || 0).toFixed(6), +(+t.amount || 0).toFixed(2), t.broker || ''].join('|');
+}
+function withKeys(list) {
+  const seen = {};
+  return list.map((t) => { const b = t.key ? t.key.replace(/#\d+$/, '') : txKey(t); seen[b] = (seen[b] || 0) + 1; return { ...t, key: `${b}#${seen[b]}` }; });
+}
+
+async function handleImportFiles(files) {
+  $('#impPreview').innerHTML = '<div class="note">Lendo planilhas…</div>';
+  try { await loadSheetJS(); } catch (e) { $('#impPreview').innerHTML = `<div class="note warn-t">${esc(e.message)}</div>`; return; }
+  const parsed = [];
+  const kinds = [];
+  for (const file of files) {
+    try {
+      const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellDates: true });
+      for (const name of wb.SheetNames) {
+        const rows = XLSX.utils.sheet_to_json(wb.Sheets[name], { defval: '', raw: true });
+        const { kind, out } = parseSheetRows(rows);
+        if (!kind) continue;
+        kinds.push(`${file.name} (${kind})`);
+        out.forEach((o) => parsed.push({ ...o, file: file.name }));
+      }
+    } catch { parsed.push({ file: file.name, line: '-', error: 'Não consegui ler este arquivo' }); }
+  }
+  if (!kinds.length && !parsed.length) {
+    $('#impPreview').innerHTML = '<div class="note warn-t">Não reconheci a planilha. Use os arquivos de Negociação ou Movimentação da Área do Investidor da B3.</div>';
+    return;
+  }
+  const existing = new Set(withKeys(txs).map((t) => t.key));
+  const incoming = withKeys(parsed.filter((o) => o.tx).map((o) => o.tx));
+  const fresh = incoming.filter((t) => !existing.has(t.key));
+  const dup = incoming.length - fresh.length;
+  const ignored = parsed.filter((o) => o.ignored);
+  const errors = parsed.filter((o) => o.error);
+  pendingImport = fresh;
+
+  const count = (type) => fresh.filter((t) => t.type === type).length;
+  const list = (arr, k) => arr.slice(0, 30).map((o) => `<li>${esc(o.file)} · linha ${o.line}: ${esc(o[k])}</li>`).join('') + (arr.length > 30 ? `<li>… e mais ${arr.length - 30}</li>` : '');
+  $('#impPreview').innerHTML = `
+    <div class="note">${esc(kinds.join(', '))}</div>
+    <div class="imp-grid">
+      <div class="cell"><div class="label">Novas</div><div class="v up">${fresh.length}</div></div>
+      <div class="cell"><div class="label">Já existiam</div><div class="v">${dup}</div></div>
+      <div class="cell"><div class="label">Ignoradas</div><div class="v">${ignored.length}</div></div>
+      <div class="cell"><div class="label">Com erro</div><div class="v ${errors.length ? 'down' : ''}">${errors.length}</div></div>
+    </div>
+    ${fresh.length ? `<div class="note">${count('buy')} compras · ${count('sell')} vendas · ${count('income')} proventos · ${count('split')} eventos</div>` : ''}
+    ${errors.length ? `<details open><summary>Com erro (não entram)</summary><ul>${list(errors, 'error')}</ul></details>` : ''}
+    ${ignored.length ? `<details><summary>Ignoradas</summary><ul>${list(ignored, 'ignored')}</ul></details>` : ''}`;
+  $('#btnDoImport').disabled = !fresh.length;
+  $('#btnDoImport').textContent = fresh.length ? `Importar ${fresh.length}` : 'Nada novo';
+}
+
+function doImport() {
+  if (!pendingImport?.length) return;
+  let id = Date.now();
+  txs = withKeys(txs).concat(pendingImport.map((t) => ({ ...t, id: id++ })));
+  save(KEY_TX, txs);
+  const n = pendingImport.length;
+  pendingImport = null;
+  $('#dlgImport').close();
+  render(); refreshQuotes(); loadCDI();
+  // Avisa se alguma venda ficou maior que a posição (falta histórico antigo)
+  const neg = [];
+  const hold = {};
+  for (const t of sortedTxs()) {
+    hold[t.ticker] ||= 0;
+    if (t.type === 'buy') hold[t.ticker] += t.qty;
+    else if (t.type === 'split') hold[t.ticker] += t.qty;
+    else if (t.type === 'sell') { if (t.qty > hold[t.ticker] + 1e-9) neg.push(t.ticker); hold[t.ticker] = Math.max(0, hold[t.ticker] - t.qty); }
+  }
+  toast(`${n} operações importadas` + (neg.length ? ` · atenção: venda maior que a posição em ${[...new Set(neg)].join(', ')} (faltam compras antigas)` : ''));
+}
+
+// =====================================================================
+// Diálogos, toast, abas
+// =====================================================================
+function showDialog(sel) { const d = $(sel); if (!d.open) d.showModal(); }
 let toastTimer;
 function toast(msg) {
   const el = $('#toast');
   el.textContent = msg;
   el.classList.remove('hidden');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.add('hidden'), 3500);
+  toastTimer = setTimeout(() => el.classList.add('hidden'), 4500);
 }
 
-// ---------- Eventos ----------
+let tab = 'Carteira';
+function setTab(name) {
+  tab = name;
+  $('#tabCarteira').classList.toggle('hidden', name !== 'Carteira');
+  $('#tabScreener').classList.toggle('hidden', name !== 'Screener');
+  $('#pageTitle').textContent = name;
+  document.querySelectorAll('.tabbar button').forEach((b) => b.classList.toggle('on', b.dataset.tab === name));
+  if (name === 'Screener') { renderScreener(); loadScreener(); }
+  window.scrollTo(0, 0);
+}
+
+// =====================================================================
+// Eventos
+// =====================================================================
 document.addEventListener('click', (e) => {
   const close = e.target.closest('[data-close]');
   if (close) { close.closest('dialog').close(); return; }
   if (e.target.tagName === 'DIALOG') { e.target.close(); return; } // toque fora
+  const tb = e.target.closest('.tabbar button');
+  if (tb) { setTab(tb.dataset.tab); return; }
   const pos = e.target.closest('.pos');
-  if (pos) { openPosition(pos.dataset.t); return; }
+  if (pos) { openAsset(pos.dataset.t); return; }
+  const scr = e.target.closest('.scr');
+  if (scr) { openAsset(scr.dataset.a); return; }
   const del = e.target.closest('[data-del]');
   if (del) {
     const id = Number(del.dataset.del);
     const t = txs.find((x) => x.id === id);
-    if (t && confirm(`Apagar ${t.type === 'buy' ? 'compra' : 'venda'} de ${num.format(t.qty)} ${t.ticker} em ${fmtDate(t.date)}?`)) {
+    const what = { buy: 'compra', sell: 'venda', split: 'evento', income: 'provento' }[t?.type];
+    if (t && confirm(`Apagar ${what} de ${t.ticker} em ${fmtDate(t.date)}?`)) {
       txs = txs.filter((x) => x.id !== id);
       save(KEY_TX, txs);
       render();
       const still = positions().find((x) => x.ticker === t.ticker);
-      if (still && still.txs.length) openPosition(t.ticker); else $('#dlgPos').close();
+      if (still && still.txs.length) drawAsset(t.ticker, still, histCache[t.ticker]); else $('#dlgPos').close();
     }
   }
 });
 
 $('#btnAdd').onclick = () => openTxForm();
 $('#posAddTx').onclick = (e) => { const t = e.target.dataset.t; $('#dlgPos').close(); openTxForm(t); };
-$('#btnRefresh').onclick = () => refreshQuotes(true);
+$('#btnRefresh').onclick = () => { refreshQuotes(true); loadScreener(true); };
 $('#btnSettings').onclick = () => { $('#setToken').value = token; showDialog('#dlgSettings'); };
 $('#formTx').addEventListener('input', updateTxHint);
+$('#formTx').addEventListener('change', (e) => { if (e.target.name === 'type') { setTxMode(e.target.value); updateTxHint(); } });
+$('#btnQuick').onclick = applyQuick;
+$('#quick').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); applyQuick(); } });
+document.querySelectorAll('input[name=comp]').forEach((i) => i.addEventListener('change', render));
+['#scrSearch', '#scrSector', '#scrSort'].forEach((s) => $(s).addEventListener('input', renderScreener));
+$('#scrMethods').addEventListener('change', renderScreener);
 
 $('#formTx').addEventListener('submit', (e) => {
   e.preventDefault();
   const f = e.target;
   const ticker = f.ticker.value.trim().toUpperCase().replace(/\.SA$/, '');
-  const qty = parseNum(f.qty.value), price = parseNum(f.price.value), fees = parseNum(f.fees.value);
   const type = f.type.value;
   if (!/^[A-Z0-9]{4,8}$/.test(ticker)) return toast('Código inválido (ex.: PETR4)');
-  if (qty <= 0 || price <= 0) return toast('Quantidade e preço precisam ser maiores que zero');
-  if (type === 'sell') {
-    const p = positions().find((x) => x.ticker === ticker);
-    if (!p || p.qty < qty - 1e-9) return toast(`Você só tem ${p ? num.format(p.qty) : 0} ${ticker}`);
+  if (type === 'income') {
+    const amount = parseNum(f.amount.value);
+    if (amount <= 0) return toast('Informe o valor recebido');
+    txs.push({ id: Date.now(), type, ticker, amount, kind: f.kind.value, qty: 0, price: 0, fees: 0, date: f.date.value });
+  } else {
+    const qty = parseNum(f.qty.value), price = parseNum(f.price.value), fees = parseNum(f.fees.value);
+    if (qty <= 0 || price <= 0) return toast('Quantidade e preço precisam ser maiores que zero');
+    if (type === 'sell') {
+      const p = positions().find((x) => x.ticker === ticker);
+      if (!p || p.qty < qty - 1e-9) return toast(`Você só tem ${p ? num.format(p.qty) : 0} ${ticker}`);
+    }
+    txs.push({ id: Date.now(), type, ticker, qty, price, fees, date: f.date.value });
   }
-  txs.push({ id: Date.now(), type, ticker, qty, price, fees, date: f.date.value });
   save(KEY_TX, txs);
   f.closest('dialog').close();
   render();
+  loadCDI();
   if (!quotes[ticker] || Date.now() - quotes[ticker].fetchedAt > 60_000) refreshQuotes();
 });
 
@@ -279,9 +962,21 @@ $('#formSettings').addEventListener('submit', (e) => {
   refreshQuotes(true);
 });
 
+$('#btnOpenImport').onclick = () => {
+  $('#dlgSettings').close();
+  pendingImport = null;
+  $('#impPreview').innerHTML = '';
+  $('#btnDoImport').disabled = true;
+  $('#btnDoImport').textContent = 'Importar';
+  showDialog('#dlgImport');
+};
+$('#emptyImport').onclick = (e) => { e.preventDefault(); $('#btnOpenImport').click(); };
+$('#impFiles').onchange = (e) => { const files = [...e.target.files]; e.target.value = ''; if (files.length) handleImportFiles(files); };
+$('#btnDoImport').onclick = doImport;
+
 $('#btnExport').onclick = async () => {
-  const data = JSON.stringify({ app: 'carteira', version: 1, exportedAt: new Date().toISOString(), txs }, null, 2);
-  const name = `carteira-${new Date().toLocaleDateString('sv-SE')}.json`;
+  const data = JSON.stringify({ app: 'carteira', version: 2, exportedAt: new Date().toISOString(), txs }, null, 2);
+  const name = `carteira-${todayIso()}.json`;
   const file = new File([data], name, { type: 'application/json' });
   if (navigator.canShare && navigator.canShare({ files: [file] })) {
     try { await navigator.share({ files: [file], title: 'Backup Carteira' }); return; } catch (err) { if (err.name === 'AbortError') return; }
@@ -301,13 +996,19 @@ $('#fileImport').onchange = async (e) => {
     const j = JSON.parse(await file.text());
     const list = Array.isArray(j) ? j : j.txs;
     if (!Array.isArray(list)) throw new Error();
-    const clean = list.filter((t) => t && t.ticker && t.qty > 0 && t.price > 0 && t.date && (t.type === 'buy' || t.type === 'sell'));
+    const types = ['buy', 'sell', 'split', 'income'];
+    const clean = list.filter((t) => t && t.ticker && t.date && types.includes(t.type) &&
+      (t.type === 'income' ? t.amount > 0 : t.type === 'split' ? t.qty : t.qty > 0 && t.price > 0));
     if (!confirm(`Importar ${clean.length} operações? Isso substitui as ${txs.length} atuais.`)) return;
-    txs = clean.map((t, i) => ({ id: t.id || Date.now() + i, type: t.type, ticker: String(t.ticker).toUpperCase(), qty: +t.qty, price: +t.price, fees: +t.fees || 0, date: t.date }));
+    txs = clean.map((t, i) => ({
+      id: t.id || Date.now() + i, type: t.type, ticker: String(t.ticker).toUpperCase(),
+      qty: +t.qty || 0, price: +t.price || 0, fees: +t.fees || 0, date: t.date,
+      ...(t.amount ? { amount: +t.amount } : {}), ...(t.kind ? { kind: t.kind } : {}),
+      ...(t.broker ? { broker: t.broker } : {}), ...(t.key ? { key: t.key } : {}),
+    }));
     save(KEY_TX, txs);
     $('#dlgSettings').close();
-    render();
-    refreshQuotes();
+    render(); refreshQuotes(); loadCDI();
     toast('Backup importado');
   } catch { toast('Arquivo inválido'); }
 };
@@ -317,6 +1018,8 @@ const STALE_MS = 5 * 60_000;
 function refreshIfStale() {
   const open = positions().filter((p) => p.qty > 0);
   if (open.some((p) => !p.quote || Date.now() - p.quote.fetchedAt > STALE_MS)) refreshQuotes();
+  loadScreener();
+  loadCDI();
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshIfStale(); });
 setInterval(() => { if (!document.hidden) refreshIfStale(); }, 60_000);
