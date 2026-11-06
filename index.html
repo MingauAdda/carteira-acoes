@@ -41,19 +41,20 @@
     </div>
 
     <section id="list" class="list"></section>
-    <p id="empty" class="empty hidden">Nenhuma ação ainda.<br>Toque em <b>+</b> para registrar uma compra<br>ou <a href="#" id="emptyImport">importe as planilhas da B3</a>.</p>
+    <p id="empty" class="empty hidden">Nenhum ativo ainda.<br>Toque em <b>+</b> para registrar uma compra<br>ou <a href="#" id="emptyImport">importe as planilhas da B3</a>.</p>
 
     <section id="insights" class="hidden">
+      <h2 class="sec">Composição</h2>
+      <div class="seg small three" id="compSeg">
+        <label><input type="radio" name="comp" value="ativo" checked><span>Por ativo</span></label>
+        <label><input type="radio" name="comp" value="classe"><span>Por classe</span></label>
+        <label><input type="radio" name="comp" value="setor"><span>Por setor</span></label>
+      </div>
+      <div class="card" id="composition"></div>
       <h2 class="sec">Resultado</h2>
       <div class="card" id="result"></div>
       <h2 class="sec">Valor justo da carteira</h2>
       <div class="card" id="scenarios"></div>
-      <h2 class="sec">Composição</h2>
-      <div class="seg small" id="compSeg">
-        <label><input type="radio" name="comp" value="acao" checked><span>Por ação</span></label>
-        <label><input type="radio" name="comp" value="setor"><span>Por setor</span></label>
-      </div>
-      <div class="card" id="composition"></div>
     </section>
   </main>
 
@@ -106,6 +107,15 @@
         <input name="ticker" id="txTicker" required autocapitalize="characters" autocomplete="off" placeholder="PETR4" list="tickerList">
         <datalist id="tickerList"></datalist>
       </label>
+      <div class="field" id="fClass">Tipo de ativo
+        <div class="chips cls-pick">
+          <label><input type="radio" name="cls" value="acao" checked><span>Ação</span></label>
+          <label><input type="radio" name="cls" value="fii"><span>FII</span></label>
+          <label><input type="radio" name="cls" value="etf"><span>ETF</span></label>
+          <label><input type="radio" name="cls" value="bdr"><span>BDR</span></label>
+          <label><input type="radio" name="cls" value="outro"><span>Outro</span></label>
+        </div>
+      </div>
       <div class="two">
         <label class="field" id="fQty">Quantidade
           <input name="qty" type="number" inputmode="decimal" step="any" min="0" required placeholder="100">

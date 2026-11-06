@@ -7,7 +7,7 @@ const KEY_TX = 'carteira.tx.v1';
 const KEY_QUOTES = 'carteira.quotes.v1';
 const KEY_TOKEN = 'carteira.token';
 const KEY_SCREENER = 'carteira.screener.v1';
-const KEY_CDI = 'carteira.cdi.v1';
+const KEY_CLASSES = 'carteira.classes.v1';
 
 function load(key, fallback) {
   try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; }
@@ -24,7 +24,7 @@ let txs = load(KEY_TX, []);
 let quotes = load(KEY_QUOTES, {});
 let token = load(KEY_TOKEN, '');
 let screener = load(KEY_SCREENER, null); // {fetchedAt, rodada, rows: {TICKER: {...}}}
-let cdiCache = load(KEY_CDI, null);      // {fetchedAt, from, series: [[iso, pctDia], ...]}
+let classes = load(KEY_CLASSES, {});    // {TICKER: 'acao'|'fii'|'etf'|'bdr'|'outro'}
 
 // =====================================================================
 // Formatação
@@ -237,49 +237,47 @@ function valuation(ticker) {
 }
 
 // =====================================================================
-// CDI (Banco Central, série 12) — "e se esse dinheiro estivesse no CDI?"
+// Classes de ativo
 // =====================================================================
-async function loadCDI() {
-  const flows = txs.filter((t) => t.type !== 'split');
-  if (!flows.length) return;
-  let from = flows.reduce((m, t) => (t.date < m ? t.date : m), todayIso());
-  const tenY = new Date(); tenY.setFullYear(tenY.getFullYear() - 10); tenY.setDate(tenY.getDate() + 2);
-  if (from < tenY.toLocaleDateString('sv-SE')) from = tenY.toLocaleDateString('sv-SE');
-  if (cdiCache && cdiCache.from <= from && Date.now() - cdiCache.fetchedAt < 12 * 3600_000) return;
-  const br = (iso) => fmtDate(iso);
-  try {
-    const url = `https://api.bcb.gov.br/dados/serie/bcdata.sgs.12/dados?formato=json&dataInicial=${br(from)}&dataFinal=${br(todayIso())}`;
-    const j = await fetch(url).then((r) => r.json());
-    if (!Array.isArray(j)) throw new Error();
-    const series = j.map((d) => { const [dd, mm, yy] = d.data.split('/'); return [`${yy}-${mm}-${dd}`, parseFloat(d.valor)]; });
-    cdiCache = { fetchedAt: Date.now(), from, series };
-    save(KEY_CDI, cdiCache);
-    render();
-  } catch {}
+const CLASSES = { acao: 'Ações', fii: 'FIIs', etf: 'ETFs', bdr: 'BDRs', outro: 'Outros' };
+const CLASS_ONE = { acao: 'Ação', fii: 'FII', etf: 'ETF', bdr: 'BDR', outro: 'Outro' };
+const CLASS_COLOR = { acao: '#3b82f6', fii: '#f59e0b', etf: '#22c55e', bdr: '#a855f7', outro: '#8b93a1' };
+const KNOWN_ETF = new Set(('BOVA11 BOVV11 BOVX11 BOVB11 BRAX11 SMAL11 SMAC11 IVVB11 SPXI11 NASD11 HASH11 QBTC11 BITH11 ETHE11 QETH11 ' +
+  'GOLD11 IMAB11 IRFM11 B5P211 FIXA11 DIVO11 ECOO11 ISUS11 MATB11 PIBB11 XBOV11 BBSD11 GOVE11 FIND11 ACWI11 ' +
+  'EURP11 XINA11 TECK11 WRLD11 BDIV11 NSDV11 USDB11 DEBB11 IB5M11 LFTS11 B5MB11 IMBB11 AUPO11 META11 SPXR11').split(' '));
+function guessClass(t) {
+  if (KNOWN_ETF.has(t)) return 'etf';
+  if (screener?.rows[t]) return 'acao';
+  if (/^[A-Z]{4}3[2-5]$/.test(t)) return 'bdr';
+  if (/^[A-Z]{4}11$/.test(t)) return 'fii';
+  if (/^[A-Z0-9]{4}([3-8])$/.test(t)) return 'acao';
+  return 'outro';
+}
+const classOf = (t) => classes[t] || guessClass(t);
+function setClass(t, c) {
+  if (!CLASSES[c]) return;
+  if (c === guessClass(t)) delete classes[t]; else classes[t] = c;
+  save(KEY_CLASSES, classes);
 }
 
-// Fator acumulado do CDI de `iso` até hoje
-function cdiFactor(iso) {
-  if (!cdiCache) return null;
-  let f = 1;
-  for (const [d, v] of cdiCache.series) if (d >= iso) f *= 1 + v / 100;
-  return f;
-}
-
-// Compara a carteira com o CDI: cada compra vira aplicação, cada venda/provento vira resgate
-function cdiCompare(ps) {
-  if (!cdiCache) return null;
-  let cdi = 0;
-  for (const t of txs) {
-    const f = cdiFactor(t.date < cdiCache.from ? cdiCache.from : t.date);
-    if (t.type === 'buy') cdi += (t.qty * t.price + (t.fees || 0)) * f;
-    else if (t.type === 'sell') cdi -= (t.qty * t.price - (t.fees || 0)) * f;
-    else if (t.type === 'income') cdi -= (t.amount || 0) * f;
-  }
-  const open = ps.filter((p) => p.qty > 0);
-  if (open.some((p) => !p.quote)) return null;
-  const real = open.reduce((s, p) => s + p.value, 0);
-  return { cdi, real };
+// Gráfico de pizza (rosca) em SVG
+function donut(items, total, centerLabel) {
+  const R = 52, C = 2 * Math.PI * R;
+  let off = 0;
+  const arcs = items.map(([, v, color]) => {
+    const len = (v / total) * C;
+    const a = `<circle r="${R}" cx="70" cy="70" fill="none" stroke="${color}" stroke-width="26"
+      stroke-dasharray="${Math.max(0, len - (items.length > 1 ? 1.5 : 0)).toFixed(2)} ${C.toFixed(2)}" stroke-dashoffset="${(-off).toFixed(2)}"/>`;
+    off += len;
+    return a;
+  }).join('');
+  return `<div class="pie">
+    <svg viewBox="0 0 140 140" role="img" aria-label="Gráfico de pizza da composição"><g transform="rotate(-90 70 70)">${arcs}</g>
+      <text x="70" y="66" text-anchor="middle" class="pie-n">${items.length}</text>
+      <text x="70" y="84" text-anchor="middle" class="pie-l">${esc(centerLabel)}</text></svg>
+    <div class="legend">${items.map(([k, v, color]) => `<div class="lg"><i style="background:${color}"></i>
+      <span>${esc(k)}</span><b>${pct0(v / total * 100)}</b><em>${money(v)}</em></div>`).join('')}</div>
+  </div>`;
 }
 
 // =====================================================================
@@ -310,7 +308,24 @@ function render() {
   $('#tokenWarn').classList.toggle('hidden', !!token || !open.length);
   $('#empty').classList.toggle('hidden', open.length > 0);
 
-  $('#list').innerHTML = open.map((p) => {
+  const byClass = {};
+  for (const p of open) (byClass[classOf(p.ticker)] ||= []).push(p);
+  const multi = Object.keys(byClass).length > 1;
+  $('#list').innerHTML = Object.keys(CLASSES).filter((c) => byClass[c]).map((c) => {
+    const list = byClass[c];
+    const v = list.reduce((s, p) => s + (p.value ?? p.cost), 0);
+    const share = value ? v / value * 100 : 0;
+    return `<div class="grp"><div class="grp-h"><span><i style="background:${CLASS_COLOR[c]}"></i>${CLASSES[c]}</span>
+      <span>${money(v)}${multi ? ` · ${pct0(share)}` : ''}</span></div>${list.map(posHtml).join('')}</div>`;
+  }).join('');
+
+  $('#tickerList').innerHTML = [...new Set([...ps.map((p) => p.ticker), ...Object.keys(screener?.rows || {})])]
+    .map((t) => `<option value="${esc(t)}">`).join('');
+
+  renderInsights(ps, open, value, cost);
+}
+
+function posHtml(p) {
     const q = p.quote;
     const right = q
       ? `<div class="v">${money(p.value)}</div><div class="p ${cls(p.pl)}">${signed(p.pl)} (${pct(p.plPct)})</div>`
@@ -322,12 +337,6 @@ function render() {
         <div class="s">${num.format(p.qty)} × PM ${money(p.avg)}${q ? ` · ${money(q.price)}` : ''}</div></div>
       <div class="r">${right}</div>
     </button>`;
-  }).join('');
-
-  $('#tickerList').innerHTML = [...new Set([...ps.map((p) => p.ticker), ...Object.keys(screener?.rows || {})])]
-    .map((t) => `<option value="${esc(t)}">`).join('');
-
-  renderInsights(ps, open, value, cost);
 }
 
 function logoHtml(ticker, big = false) {
@@ -340,30 +349,31 @@ function renderInsights(ps, open, value, cost) {
   $('#insights').classList.toggle('hidden', !ps.length);
   if (!ps.length) return;
 
-  // ---- Resultado total + CDI + proventos
+  // ---- Composição (pizza): por ativo, por classe ou por setor
+  const mode = document.querySelector('input[name=comp]:checked').value;
+  const groups = {};
+  for (const p of open) {
+    const c = classOf(p.ticker);
+    const k = mode === 'classe' ? c : mode === 'setor' ? (screener?.rows[p.ticker]?.sector || CLASS_ONE[c] + (c === 'acao' ? ' (sem setor)' : '')) : p.ticker;
+    groups[k] = (groups[k] || 0) + (p.value ?? p.cost);
+  }
+  const tot = Object.values(groups).reduce((a, b) => a + b, 0) || 1;
+  const items = Object.entries(groups).sort((a, b) => b[1] - a[1])
+    .map(([k, v], i) => mode === 'classe' ? [CLASSES[k], v, CLASS_COLOR[k]] : [k, v, PALETTE[i % PALETTE.length]]);
+  const top = items[0];
+  const center = { ativo: items.length === 1 ? 'ativo' : 'ativos', classe: items.length === 1 ? 'classe' : 'classes', setor: items.length === 1 ? 'setor' : 'setores' }[mode];
+  $('#composition').innerHTML = (open.length ? donut(items, tot, center) : '') + (top && top[1] / tot > 0.35 && items.length > 1 && mode !== 'classe'
+    ? `<div class="note warn-t">Concentração: ${esc(top[0])} é ${pct0(top[1] / tot * 100)} da carteira.</div>` : '');
+
+  // ---- Resultado total + proventos
   const realized = ps.reduce((s, p) => s + p.realized, 0);
   const income = ps.reduce((s, p) => s + p.income, 0);
   const unreal = value - cost;
   const total = unreal + realized + income;
-  const cmp = cdiCompare(ps);
-  let html = `<div class="kv"><span>Lucro não realizado</span><b class="${cls(unreal)}">${signed(unreal)}</b></div>
+  $('#result').innerHTML = `<div class="kv"><span>Lucro não realizado</span><b class="${cls(unreal)}">${signed(unreal)}</b></div>
     <div class="kv"><span>Lucro realizado (vendas)</span><b class="${cls(realized)}">${signed(realized)}</b></div>
     <div class="kv"><span>Proventos recebidos</span><b class="${cls(income)}">${signed(income)}</b></div>
     <div class="kv total"><span>Resultado total</span><b class="${cls(total)}">${signed(total)}</b></div>`;
-  if (cmp) {
-    const diff = cmp.real - cmp.cdi;
-    html += `<div class="cdi">
-      <div class="label">E se esse dinheiro estivesse no CDI?</div>
-      <div class="bars2">
-        ${bar2('Carteira hoje', cmp.real, Math.max(cmp.real, cmp.cdi), 'var(--accent)')}
-        ${bar2('No CDI', cmp.cdi, Math.max(cmp.real, cmp.cdi), '#8b93a1')}
-      </div>
-      <div class="note ${cls(diff)}">${diff >= 0 ? 'Carteira à frente do CDI em' : 'Carteira atrás do CDI em'} ${money(Math.abs(diff))}</div>
-    </div>`;
-  } else if (txs.length) {
-    html += `<div class="note">Comparação com o CDI aparece quando todas as posições tiverem cotação.</div>`;
-  }
-  $('#result').innerHTML = html;
 
   // ---- Cenários pelo valor justo (pessimista = menor método, base = combinado, otimista = maior)
   const evald = open.filter((p) => p.val && p.val.combined);
@@ -381,24 +391,8 @@ function renderInsights(ps, open, value, cost) {
     $('#scenarios').innerHTML = `<div class="note">${screener ? 'Nenhuma posição está entre as ações do Ibovespa avaliadas.' : 'Carregando avaliações…'}</div>`;
   }
 
-  // ---- Composição
-  const mode = document.querySelector('input[name=comp]:checked').value;
-  const groups = {};
-  for (const p of open) {
-    const k = mode === 'setor' ? (screener?.rows[p.ticker]?.sector || 'Sem setor') : p.ticker;
-    groups[k] = (groups[k] || 0) + (p.value ?? p.cost);
-  }
-  const tot = Object.values(groups).reduce((a, b) => a + b, 0) || 1;
-  const items = Object.entries(groups).sort((a, b) => b[1] - a[1]);
-  const top = items[0];
-  $('#composition').innerHTML = items.map(([k, v], i) => `<div class="comp">
-      <div class="comp-h"><span>${esc(k)}</span><span>${pct0(v / tot * 100)} · ${money(v)}</span></div>
-      <div class="track"><div style="width:${(v / tot * 100).toFixed(1)}%;background:${PALETTE[i % PALETTE.length]}"></div></div>
-    </div>`).join('') + (top && top[1] / tot > 0.35 && items.length > 1
-      ? `<div class="note warn-t">Concentração: ${esc(top[0])} é ${pct0(top[1] / tot * 100)} da carteira.</div>` : '');
 }
-const PALETTE = ['#3b82f6', '#22c55e', '#f59e0b', '#a855f7', '#ef4444', '#14b8a6', '#ec4899', '#84cc16', '#f97316', '#6366f1'];
-const bar2 = (label, v, max, color) => `<div class="b2"><span>${label}</span><div class="track"><div style="width:${(v / max * 100).toFixed(1)}%;background:${color}"></div></div><b>${money(v)}</b></div>`;
+const PALETTE = ['#3b82f6', '#22c55e', '#f59e0b', '#a855f7', '#ef4444', '#14b8a6', '#ec4899', '#84cc16', '#f97316', '#6366f1', '#0ea5e9', '#eab308'];
 
 // =====================================================================
 // Render — aba Screener
@@ -476,6 +470,8 @@ function drawAsset(ticker, p, h) {
   let html = `<div class="det-head">${logoHtml(ticker, true)}
       <div><div class="t">${esc(ticker)}</div><div class="s">${esc(q?.name || v?.sector || '')}</div></div>
       <div class="det-price">${price ? money(price) : ''}${q ? `<div class="${cls(q.changePct)}">${pct(q.changePct)} hoje</div>` : ''}</div></div>
+    ${has ? `<label class="cls-row">Tipo de ativo <select id="posClass">${Object.keys(CLASSES).map((c) =>
+      `<option value="${c}"${classOf(ticker) === c ? ' selected' : ''}>${CLASS_ONE[c]}</option>`).join('')}</select></label>` : ''}
     <div id="chart" class="chart">${h ? chartSvg(h.prices, p && p.qty > 0 ? p.avg : null) : '<div class="note">Carregando gráfico…</div>'}</div>`;
 
   if (has) {
@@ -598,6 +594,8 @@ function openTxForm(ticker = '') {
   f.ticker.value = ticker;
   f.date.value = todayIso();
   $('#txHint').textContent = '';
+  clsTouched = false;
+  syncClassPick();
   setTxMode('buy');
   showDialog('#dlgTx');
   setTimeout(() => (ticker ? f.qty : $('#quick')).focus(), 50);
@@ -613,6 +611,16 @@ function setTxMode(type) {
   $('#fAmount').classList.toggle('hidden', !inc);
   $('#fKind').classList.toggle('hidden', !inc);
   f.qty.required = !inc; f.price.required = !inc; f.amount.required = inc;
+  $('#fClass').classList.toggle('hidden', type !== 'buy');
+}
+
+// Tipo de ativo no formulário: sugere pelo código até a pessoa escolher
+let clsTouched = false;
+function syncClassPick() {
+  if (clsTouched) return;
+  const t = $('#formTx').ticker.value.trim().toUpperCase();
+  const c = t ? classOf(t) : 'acao';
+  $('#formTx').querySelector(`input[name=cls][value=${c}]`).checked = true;
 }
 
 function updateTxHint() {
@@ -674,7 +682,7 @@ function applyQuick() {
   const r = parseQuick(text);
   const f = $('#formTx');
   if (r.type) setTxMode(r.type);
-  if (r.ticker) f.ticker.value = r.ticker;
+  if (r.ticker) { f.ticker.value = r.ticker; syncClassPick(); }
   if (r.qty) f.qty.value = String(r.qty);
   if (r.price) f.price.value = String(r.price).replace('.', ',');
   if (r.fees) f.fees.value = String(r.fees).replace('.', ',');
@@ -850,7 +858,7 @@ function doImport() {
   const n = pendingImport.length;
   pendingImport = null;
   $('#dlgImport').close();
-  render(); refreshQuotes(); loadCDI();
+  render(); refreshQuotes();
   // Avisa se alguma venda ficou maior que a posição (falta histórico antigo)
   const neg = [];
   const hold = {};
@@ -920,7 +928,18 @@ $('#posAddTx').onclick = (e) => { const t = e.target.dataset.t; $('#dlgPos').clo
 $('#btnRefresh').onclick = () => { refreshQuotes(true); loadScreener(true); };
 $('#btnSettings').onclick = () => { $('#setToken').value = token; showDialog('#dlgSettings'); };
 $('#formTx').addEventListener('input', updateTxHint);
-$('#formTx').addEventListener('change', (e) => { if (e.target.name === 'type') { setTxMode(e.target.value); updateTxHint(); } });
+$('#formTx').addEventListener('change', (e) => {
+  if (e.target.name === 'type') { setTxMode(e.target.value); updateTxHint(); }
+  if (e.target.name === 'cls') clsTouched = true;
+});
+$('#txTicker').addEventListener('input', syncClassPick);
+$('#posBody').addEventListener('change', (e) => {
+  if (e.target.id !== 'posClass') return;
+  const t = $('#posBody').dataset.t;
+  setClass(t, e.target.value);
+  render();
+  toast(`${t} agora está em ${CLASSES[e.target.value]}`);
+});
 $('#btnQuick').onclick = applyQuick;
 $('#quick').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); applyQuick(); } });
 document.querySelectorAll('input[name=comp]').forEach((i) => i.addEventListener('change', render));
@@ -945,11 +964,11 @@ $('#formTx').addEventListener('submit', (e) => {
       if (!p || p.qty < qty - 1e-9) return toast(`Você só tem ${p ? num.format(p.qty) : 0} ${ticker}`);
     }
     txs.push({ id: Date.now(), type, ticker, qty, price, fees, date: f.date.value });
+    if (type === 'buy') setClass(ticker, f.cls.value);
   }
   save(KEY_TX, txs);
   f.closest('dialog').close();
   render();
-  loadCDI();
   if (!quotes[ticker] || Date.now() - quotes[ticker].fetchedAt > 60_000) refreshQuotes();
 });
 
@@ -975,7 +994,7 @@ $('#impFiles').onchange = (e) => { const files = [...e.target.files]; e.target.v
 $('#btnDoImport').onclick = doImport;
 
 $('#btnExport').onclick = async () => {
-  const data = JSON.stringify({ app: 'carteira', version: 2, exportedAt: new Date().toISOString(), txs }, null, 2);
+  const data = JSON.stringify({ app: 'carteira', version: 3, exportedAt: new Date().toISOString(), txs, classes }, null, 2);
   const name = `carteira-${todayIso()}.json`;
   const file = new File([data], name, { type: 'application/json' });
   if (navigator.canShare && navigator.canShare({ files: [file] })) {
@@ -1007,8 +1026,12 @@ $('#fileImport').onchange = async (e) => {
       ...(t.broker ? { broker: t.broker } : {}), ...(t.key ? { key: t.key } : {}),
     }));
     save(KEY_TX, txs);
+    if (j && j.classes && typeof j.classes === 'object') {
+      classes = Object.fromEntries(Object.entries(j.classes).filter(([, c]) => CLASSES[c]));
+      save(KEY_CLASSES, classes);
+    }
     $('#dlgSettings').close();
-    render(); refreshQuotes(); loadCDI();
+    render(); refreshQuotes();
     toast('Backup importado');
   } catch { toast('Arquivo inválido'); }
 };
@@ -1019,7 +1042,7 @@ function refreshIfStale() {
   const open = positions().filter((p) => p.qty > 0);
   if (open.some((p) => !p.quote || Date.now() - p.quote.fetchedAt > STALE_MS)) refreshQuotes();
   loadScreener();
-  loadCDI();
+ 
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshIfStale(); });
 setInterval(() => { if (!document.hidden) refreshIfStale(); }, 60_000);
