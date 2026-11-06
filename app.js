@@ -13,8 +13,62 @@ function load(key, fallback) {
   try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; }
   catch { return fallback; }
 }
+// Dados do usuário (não dá para buscar de novo) ficam também no IndexedDB, como cópia de segurança.
+const KEEP = [KEY_TX, KEY_CLASSES, KEY_TOKEN];
 function save(key, value) {
-  try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+  const s = JSON.stringify(value);
+  try { localStorage.setItem(key, s); }
+  catch {
+    // Sem espaço: descarta caches (cotações/avaliações) e tenta de novo
+    if (KEEP.includes(key)) {
+      try { localStorage.removeItem(KEY_SCREENER); localStorage.removeItem(KEY_QUOTES); localStorage.setItem(key, s); } catch {}
+    }
+  }
+  if (KEEP.includes(key)) idbPut(key, s);
+}
+
+function idb() {
+  return new Promise((ok, fail) => {
+    if (!window.indexedDB) return fail(new Error('sem IndexedDB'));
+    const r = indexedDB.open('carteira', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('kv');
+    r.onsuccess = () => ok(r.result);
+    r.onerror = () => fail(r.error);
+  });
+}
+async function idbPut(key, s) {
+  try { const db = await idb(); db.transaction('kv', 'readwrite').objectStore('kv').put(s, key); } catch {}
+}
+async function idbGet(key) {
+  try {
+    const db = await idb();
+    return await new Promise((ok) => {
+      const r = db.transaction('kv').objectStore('kv').get(key);
+      r.onsuccess = () => ok(r.result ?? null);
+      r.onerror = () => ok(null);
+    });
+  } catch { return null; }
+}
+
+// Se o localStorage foi limpo, recupera do IndexedDB; se o IndexedDB está vazio, copia para ele.
+async function syncBackupStore() {
+  let restored = false;
+  for (const key of KEEP) {
+    const local = localStorage.getItem(key);
+    const copy = await idbGet(key);
+    const empty = !local || local === '[]' || local === '{}' || local === '""';
+    if (empty && copy && copy !== local && copy !== '[]' && copy !== '{}' && copy !== '""') {
+      try { localStorage.setItem(key, copy); } catch {}
+      restored = true;
+    } else if (local && !empty) idbPut(key, local);
+  }
+  if (restored) {
+    txs = load(KEY_TX, []); classes = load(KEY_CLASSES, {}); token = load(KEY_TOKEN, '');
+    render(); refreshQuotes();
+    toast('Dados recuperados');
+  }
+  // Pede ao navegador para não apagar os dados sozinho
+  try { if (navigator.storage?.persist && !(await navigator.storage.persisted())) await navigator.storage.persist(); } catch {}
 }
 
 // Operações: {id, type: buy|sell|split|income, ticker, qty, price, fees, date, amount?, kind?, broker?, key?}
@@ -1049,6 +1103,18 @@ setInterval(() => { if (!document.hidden) refreshIfStale(); }, 60_000);
 
 render();
 refreshIfStale();
+syncBackupStore();
+
+// Fora do app instalado (Safari, navegador do WhatsApp/Instagram) os dados ficam em outro lugar
+// e o iPhone apaga depois de alguns dias sem uso.
+const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+let installHidden = false;
+try { installHidden = localStorage.getItem('carteira.installHidden') === '1'; } catch {}
+if (!standalone && !installHidden) $('#installWarn').classList.remove('hidden');
+$('#installClose').onclick = () => {
+  $('#installWarn').classList.add('hidden');
+  try { localStorage.setItem('carteira.installHidden', '1'); } catch {}
+};
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
