@@ -283,3 +283,12 @@ body { padding-bottom: calc(env(safe-area-inset-bottom) + 150px); }
 .cls-row select { background: var(--card2); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 7px 10px; font-size: 15px; }
 #installWarn { position: relative; padding-right: 36px; }
 .warn-x { position: absolute; top: 6px; right: 8px; background: none; border: 0; color: inherit; font-size: 22px; line-height: 1; padding: 4px; cursor: pointer; }
+.warn-btn { position: relative; background: #3a2a0c; color: #fcd58b; font-weight: 800; font-size: 20px; }
+.warn-btn .badge:empty { display: none; }
+.warn-btn .badge { position: absolute; top: -3px; right: -3px; min-width: 18px; height: 18px; border-radius: 9px; background: var(--red, #ef4444); color: #fff; font-size: 11px; line-height: 18px; padding: 0 4px; }
+#dlgWarn .warn { margin-bottom: 10px; line-height: 1.45; }
+.small-btn { margin-top: 10px; padding: 8px 12px; font-size: 13.5px; }
+.pos .t { white-space: nowrap; }
+.pos .t .now { margin-left: 6px; font-weight: 600; font-size: 13px; color: var(--muted); }
+.pos .t .chip { margin-left: 4px; padding: 1px 5px; }
+.pos > div:nth-child(2) { min-width: 0; }

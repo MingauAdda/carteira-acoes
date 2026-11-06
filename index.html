@@ -18,6 +18,7 @@
   <header class="top">
     <h1 id="pageTitle">Carteira</h1>
     <div class="top-actions">
+      <button id="btnWarn" class="icon-btn warn-btn hidden" aria-label="Avisos">!<span id="warnCount" class="badge"></span></button>
       <button id="btnRefresh" class="icon-btn" aria-label="Atualizar cotações">⟳</button>
       <button id="btnSettings" class="icon-btn" aria-label="Ajustes">⚙</button>
     </div>
@@ -36,17 +37,6 @@
       <div class="updated" id="updated"></div>
     </section>
 
-    <div id="installWarn" class="warn hidden">
-      <button type="button" id="installClose" class="warn-x" aria-label="Fechar">×</button>
-      <b>Para não perder seus dados:</b> no Safari, toque em Compartilhar → <b>Adicionar à Tela de Início</b> e
-      abra sempre pelo ícone. Aberto pelo navegador ou por link do WhatsApp/Instagram, o app usa outra memória,
-      que o iPhone pode apagar.
-    </div>
-
-    <div id="tokenWarn" class="warn hidden">
-      Cadastre seu token grátis da <b>brapi.dev</b> em ⚙ Ajustes para ver as cotações.
-    </div>
-
     <section id="list" class="list"></section>
     <p id="empty" class="empty hidden">Nenhum ativo ainda.<br>Toque em <b>+</b> para registrar uma compra<br>ou <a href="#" id="emptyImport">importe as planilhas da B3</a>.</p>
 
@@ -60,8 +50,6 @@
       <div class="card" id="composition"></div>
       <h2 class="sec">Resultado</h2>
       <div class="card" id="result"></div>
-      <h2 class="sec">Valor justo da carteira</h2>
-      <div class="card" id="scenarios"></div>
     </section>
   </main>
 
@@ -154,6 +142,21 @@
   </dialog>
 
   <!-- Detalhe / análise da ação -->
+  <dialog id="dlgWarn" class="sheet">
+    <h2>Avisos</h2>
+    <div id="installWarn" class="warn hidden">
+      <b>Para não perder seus dados:</b> no Safari, toque em Compartilhar → <b>Adicionar à Tela de Início</b> e
+      abra sempre pelo ícone. Aberto pelo navegador ou por link do WhatsApp/Instagram, o app usa outra memória,
+      que o iPhone pode apagar.
+      <div><button type="button" id="installClose" class="btn ghost small-btn">Já instalei, não mostrar mais</button></div>
+    </div>
+    <div id="tokenWarn" class="warn hidden">
+      Cadastre seu token grátis da <b>brapi.dev</b> em ⚙ Ajustes para ver as cotações.
+      <div><button type="button" id="tokenGo" class="btn ghost small-btn">Abrir Ajustes</button></div>
+    </div>
+    <div class="actions"><button type="button" class="btn primary" data-close>Fechar</button></div>
+  </dialog>
+
   <dialog id="dlgPos" class="sheet">
     <div id="posBody"></div>
     <div class="actions">

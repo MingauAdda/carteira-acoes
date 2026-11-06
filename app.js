@@ -360,6 +360,7 @@ function render() {
     : '';
 
   $('#tokenWarn').classList.toggle('hidden', !!token || !open.length);
+  updateWarnBtn();
   $('#empty').classList.toggle('hidden', open.length > 0);
 
   const byClass = {};
@@ -384,11 +385,11 @@ function posHtml(p) {
     const right = q
       ? `<div class="v">${money(p.value)}</div><div class="p ${cls(p.pl)}">${signed(p.pl)} (${pct(p.plPct)})</div>`
       : `<div class="v">${money(p.cost)}</div><div class="p">sem cotação</div>`;
-    const dayChip = q ? `<span class="chip ${cls(q.changePct)}">${pct(q.changePct)}</span>` : '';
+    const dayChip = q ? `<span class="now">${money(q.price)}</span><span class="chip ${cls(q.changePct)}">${pct(q.changePct)}</span>` : '';
     return `<button class="pos" data-t="${esc(p.ticker)}">
       ${logoHtml(p.ticker)}
       <div><div class="t">${esc(p.ticker)}${dayChip}</div>
-        <div class="s">${num.format(p.qty)} × PM ${money(p.avg)}${q ? ` · ${money(q.price)}` : ''}</div></div>
+        <div class="s">${num.format(p.qty)} × PM ${money(p.avg)}</div></div>
       <div class="r">${right}</div>
     </button>`;
 }
@@ -429,21 +430,6 @@ function renderInsights(ps, open, value, cost) {
     <div class="kv"><span>Proventos recebidos</span><b class="${cls(income)}">${signed(income)}</b></div>
     <div class="kv total"><span>Resultado total</span><b class="${cls(total)}">${signed(total)}</b></div>`;
 
-  // ---- Cenários pelo valor justo (pessimista = menor método, base = combinado, otimista = maior)
-  const evald = open.filter((p) => p.val && p.val.combined);
-  if (evald.length) {
-    let cur = 0, pess = 0, base = 0, otim = 0;
-    for (const p of evald) {
-      cur += p.qty * p.val.price;
-      pess += p.qty * p.val.min; base += p.qty * p.val.combined; otim += p.qty * p.val.max;
-    }
-    const sc = (label, v) => `<div class="sc"><div class="label">${label}</div><div class="v">${money(v)}</div><div class="${cls(v - cur)}">${pct((v / cur - 1) * 100)}</div></div>`;
-    $('#scenarios').innerHTML = `<div class="sc-grid">${sc('Pessimista', pess)}${sc('Base', base)}${sc('Otimista', otim)}</div>
-      <div class="note">${evald.length} de ${open.length} posições avaliadas · valor de mercado delas ${money(cur)}.
-      Potencial sem prazo, não é previsão de retorno.</div>`;
-  } else {
-    $('#scenarios').innerHTML = `<div class="note">${screener ? 'Nenhuma posição está entre as ações do Ibovespa avaliadas.' : 'Carregando avaliações…'}</div>`;
-  }
 
 }
 const PALETTE = ['#3b82f6', '#22c55e', '#f59e0b', '#a855f7', '#ef4444', '#14b8a6', '#ec4899', '#84cc16', '#f97316', '#6366f1', '#0ea5e9', '#eab308'];
@@ -928,6 +914,11 @@ function doImport() {
 // =====================================================================
 // Diálogos, toast, abas
 // =====================================================================
+function updateWarnBtn() {
+  const n = document.querySelectorAll('#dlgWarn .warn:not(.hidden)').length;
+  $('#btnWarn').classList.toggle('hidden', !n);
+  $('#warnCount').textContent = n > 1 ? n : '';
+}
 function showDialog(sel) { const d = $(sel); if (!d.open) d.showModal(); }
 let toastTimer;
 function toast(msg) {
@@ -1110,9 +1101,14 @@ syncBackupStore();
 const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 let installHidden = false;
 try { installHidden = localStorage.getItem('carteira.installHidden') === '1'; } catch {}
-if (!standalone && !installHidden) $('#installWarn').classList.remove('hidden');
+$('#installWarn').classList.toggle('hidden', standalone || installHidden);
+updateWarnBtn();
+$('#btnWarn').onclick = () => showDialog('#dlgWarn');
+$('#tokenGo').onclick = () => { $('#dlgWarn').close(); $('#btnSettings').click(); };
 $('#installClose').onclick = () => {
   $('#installWarn').classList.add('hidden');
+  updateWarnBtn();
+  if (!document.querySelectorAll('#dlgWarn .warn:not(.hidden)').length) $('#dlgWarn').close();
   try { localStorage.setItem('carteira.installHidden', '1'); } catch {}
 };
 
