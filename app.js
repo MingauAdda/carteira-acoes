@@ -323,7 +323,7 @@ const KNOWN_ETF = new Set(('BOVA11 BOVV11 BOVX11 BOVB11 BRAX11 SMAL11 SMAC11 IVV
   'EURP11 XINA11 TECK11 WRLD11 BDIV11 NSDV11 USDB11 DEBB11 IB5M11 LFTS11 B5MB11 IMBB11 AUPO11 META11 SPXR11').split(' '));
 function guessClass(t) {
   if (KNOWN_ETF.has(t)) return 'etf';
-  if (screener?.rows[t]) return 'acao';
+  if (screener?.tk?.[t]) return 'acao';
   if (/^[A-Z]{4}3[2-5]$/.test(t)) return 'bdr';
   if (/^[A-Z]{4}11$/.test(t)) return 'fii';
   if (/^[A-Z0-9]{4}([3-8])$/.test(t)) return 'acao';
@@ -421,6 +421,7 @@ function logoHtml(ticker, big = false) {
 }
 
 function renderInsights(ps, open, value, cost) {
+  buildRows();
   $('#insights').classList.toggle('hidden', !ps.length);
   if (!ps.length) return;
 
@@ -429,7 +430,7 @@ function renderInsights(ps, open, value, cost) {
   const groups = {};
   for (const p of open) {
     const c = classOf(p.ticker);
-    const k = mode === 'classe' ? c : mode === 'setor' ? (screener?.rows[p.ticker]?.sector || CLASS_ONE[c] + (c === 'acao' ? ' (sem setor)' : '')) : p.ticker;
+    const k = mode === 'classe' ? c : mode === 'setor' ? (screener?.rows?.[p.ticker]?.sector || CLASS_ONE[c] + (c === 'acao' ? ' (sem setor)' : '')) : p.ticker;
     groups[k] = (groups[k] || 0) + (p.value ?? p.cost);
   }
   const tot = Object.values(groups).reduce((a, b) => a + b, 0) || 1;
@@ -1163,7 +1164,7 @@ function refreshIfStale() {
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshIfStale(); });
 setInterval(() => { if (!document.hidden) refreshIfStale(); }, 60_000);
 
-render();
+try { render(); } catch (err) { console.error(err); }
 refreshIfStale();
 syncBackupStore();
 
@@ -1184,5 +1185,5 @@ $('#installClose').onclick = () => {
 };
 
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('sw.js').catch(() => {});
+  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch(() => {});
 }
