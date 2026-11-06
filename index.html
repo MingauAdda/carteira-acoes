@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0d10">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Carteira">
+  <title>Carteira</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/icon-180.png">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <h1>Carteira</h1>
+    <div class="top-actions">
+      <button id="btnRefresh" class="icon-btn" aria-label="Atualizar cotações">⟳</button>
+      <button id="btnSettings" class="icon-btn" aria-label="Ajustes">⚙</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="summary" id="summary">
+      <div class="label">Patrimônio</div>
+      <div class="big" id="sumValue">R$ 0,00</div>
+      <div class="row">
+        <div><div class="label">Investido</div><div id="sumCost">R$ 0,00</div></div>
+        <div><div class="label">Lucro/Prejuízo</div><div id="sumPL">—</div></div>
+        <div><div class="label">Hoje</div><div id="sumDay">—</div></div>
+      </div>
+      <div class="updated" id="updated"></div>
+    </section>
+
+    <div id="tokenWarn" class="warn hidden">
+      Cadastre seu token grátis da <b>brapi.dev</b> em ⚙ Ajustes para ver as cotações.
+    </div>
+
+    <section id="list" class="list"></section>
+    <p id="empty" class="empty hidden">Nenhuma ação ainda.<br>Toque em <b>+</b> para registrar uma compra.</p>
+  </main>
+
+  <button id="btnAdd" class="fab" aria-label="Nova operação">+</button>
+
+  <!-- Nova operação -->
+  <dialog id="dlgTx" class="sheet">
+    <form id="formTx" method="dialog">
+      <h2 id="txTitle">Nova operação</h2>
+      <div class="seg">
+        <label><input type="radio" name="type" value="buy" checked><span>Compra</span></label>
+        <label><input type="radio" name="type" value="sell"><span>Venda</span></label>
+      </div>
+      <label class="field">Código
+        <input name="ticker" id="txTicker" required autocapitalize="characters" autocomplete="off" placeholder="PETR4" list="tickerList">
+        <datalist id="tickerList"></datalist>
+      </label>
+      <div class="two">
+        <label class="field">Quantidade
+          <input name="qty" type="number" inputmode="decimal" step="any" min="0" required placeholder="100">
+        </label>
+        <label class="field">Preço (R$)
+          <input name="price" type="text" inputmode="decimal" required placeholder="32,50">
+        </label>
+      </div>
+      <div class="two">
+        <label class="field">Taxas (R$)
+          <input name="fees" type="text" inputmode="decimal" placeholder="0,00">
+        </label>
+        <label class="field">Data
+          <input name="date" type="date" required>
+        </label>
+      </div>
+      <p class="hint" id="txHint"></p>
+      <div class="actions">
+        <button type="button" class="btn ghost" data-close>Cancelar</button>
+        <button type="submit" class="btn primary">Salvar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Detalhe da ação -->
+  <dialog id="dlgPos" class="sheet">
+    <div id="posBody"></div>
+    <div class="actions">
+      <button type="button" class="btn ghost" id="posAddTx">+ Operação</button>
+      <button type="button" class="btn primary" data-close>Fechar</button>
+    </div>
+  </dialog>
+
+  <!-- Ajustes -->
+  <dialog id="dlgSettings" class="sheet">
+    <form id="formSettings" method="dialog">
+      <h2>Ajustes</h2>
+      <label class="field">Token brapi.dev
+        <input name="token" id="setToken" autocomplete="off" placeholder="cole seu token aqui">
+      </label>
+      <p class="hint">Grátis: crie conta em <a href="https://brapi.dev" target="_blank" rel="noopener">brapi.dev</a> → Dashboard → copie o token. Cotações com atraso.</p>
+      <div class="actions wrap">
+        <button type="button" class="btn ghost" id="btnExport">Exportar backup</button>
+        <label class="btn ghost file">Importar backup<input type="file" id="fileImport" accept="application/json,.json"></label>
+      </div>
+      <div class="actions">
+        <button type="button" class="btn ghost" data-close>Cancelar</button>
+        <button type="submit" class="btn primary">Salvar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
