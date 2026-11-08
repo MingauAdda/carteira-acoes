@@ -12,7 +12,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="apple-touch-icon" href="icons/icon-180.png">
   <link rel="icon" href="icons/icon-192.png">
-  <link rel="stylesheet" href="style.css?v=9">
+  <link rel="stylesheet" href="style.css?v=10">
 </head>
 <body>
   <header class="top">
@@ -167,7 +167,7 @@
       <div><button type="button" id="installClose" class="btn ghost small-btn">Já instalei, não mostrar mais</button></div>
     </div>
     <div id="tokenWarn" class="warn hidden">
-      Cadastre seu token grátis da <b>brapi.dev</b> em ⚙ Ajustes para ver as cotações.
+      Token da brapi.dev não é mais necessário para as cotações.
       <div><button type="button" id="tokenGo" class="btn ghost small-btn">Abrir Ajustes</button></div>
     </div>
     <div class="actions"><button type="button" class="btn primary" data-close>Fechar</button></div>
@@ -185,10 +185,10 @@
   <dialog id="dlgSettings" class="sheet">
     <form id="formSettings" method="dialog">
       <h2>Ajustes</h2>
-      <label class="field">Token brapi.dev
+      <label class="field">Token brapi.dev (opcional)
         <input name="token" id="setToken" autocomplete="off" placeholder="cole seu token aqui">
       </label>
-      <p class="hint">Grátis: crie conta em <a href="https://brapi.dev" target="_blank" rel="noopener">brapi.dev</a> → Dashboard → copie o token. Cotações com atraso.</p>
+      <p class="hint">Não precisa para as cotações (vêm sem cadastro, com ~15 min de atraso). Só melhora o gráfico de histórico e proventos. Grátis: crie conta em <a href="https://brapi.dev" target="_blank" rel="noopener">brapi.dev</a> → Dashboard → copie o token. Cotações com atraso.</p>
       <div class="actions wrap">
         <button type="button" class="btn ghost full" id="btnOpenImport">Importar planilhas da B3</button>
         <button type="button" class="btn ghost" id="btnExport">Exportar backup</button>
@@ -220,6 +220,6 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js?v=9"></script>
+  <script src="app.js?v=10"></script>
 </body>
 </html>

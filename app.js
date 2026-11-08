@@ -190,6 +190,42 @@ function toQuote(q, ticker) {
   };
 }
 
+// Cotação sem token: lista pública da brapi (atraso de ~15 min, sem cadastro).
+// Uma chamada traz todos os ativos da B3; a API limita muitas chamadas seguidas.
+function fromList(q, ticker) {
+  if (!q || q.close == null) throw new Error('sem cotação');
+  const pctCh = q.change || 0;
+  return {
+    price: q.close,
+    change: q.close - q.close / (1 + pctCh / 100),
+    changePct: pctCh,
+    time: null,
+    name: q.name || ticker,
+    logo: q.logo || '',
+    fetchedAt: Date.now(),
+  };
+}
+async function publicList(url) {
+  const r = await fetch(url);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(r.status === 429 ? 'muitas consultas, tente em 1 min' : j.message || 'HTTP ' + r.status);
+  return j.stocks || [];
+}
+async function publicQuotes(tickers) {
+  const out = {};
+  try {
+    const all = await publicList('https://brapi.dev/api/quote/list?limit=5000');
+    const by = new Map(all.map((x) => [x.stock, x]));
+    for (const t of tickers) if (by.has(t)) out[t] = fromList(by.get(t), t);
+  } catch {}
+  for (const t of tickers) {
+    if (out[t]) continue;
+    try { out[t] = fromList((await publicList('https://brapi.dev/api/quote/list?limit=10&search=' + encodeURIComponent(t))).find((x) => x.stock === t), t); }
+    catch (e) { out[t] = e; }
+  }
+  return out;
+}
+
 let refreshing = false;
 async function refreshQuotes(manual = false) {
   if (refreshing) return;
@@ -198,15 +234,23 @@ async function refreshQuotes(manual = false) {
   refreshing = true;
   $('#btnRefresh').classList.add('spin');
   const errors = [];
-  await Promise.all(tickers.map(async (t) => {
-    try { quotes[t] = toQuote(await brapi(t), t); }
-    catch (e) { errors.push(`${t}: ${e.message}`); }
-  }));
+  let todo = tickers;
+  if (token) {
+    await Promise.all(tickers.map(async (t) => { try { quotes[t] = toQuote(await brapi(t), t); } catch {} }));
+    todo = tickers.filter((t) => !quotes[t] || Date.now() - quotes[t].fetchedAt > 60_000);
+  }
+  if (todo.length) {
+    const got = await publicQuotes(todo);
+    for (const t of todo) {
+      if (got[t] instanceof Error || !got[t]) errors.push(`${t}: ${got[t]?.message || 'sem cotação'}`);
+      else quotes[t] = got[t];
+    }
+  }
   save(KEY_QUOTES, quotes);
   refreshing = false;
   $('#btnRefresh').classList.remove('spin');
   render();
-  if (errors.length && (manual || !token)) toast(errors[0] + (errors.length > 1 ? ` (+${errors.length - 1})` : ''));
+  if (errors.length && manual) toast(errors[0] + (errors.length > 1 ? ` (+${errors.length - 1})` : ''));
 }
 
 const histCache = {};
@@ -379,7 +423,7 @@ function render() {
     ? `Atualizado às ${new Date(Math.min(...times)).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })} · cotações com atraso`
     : '';
 
-  $('#tokenWarn').classList.toggle('hidden', !!token || !open.length);
+  $('#tokenWarn').classList.add('hidden');
   updateWarnBtn();
   $('#empty').classList.toggle('hidden', open.length > 0);
 

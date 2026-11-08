@@ -1,6 +1,6 @@
 // Cache do app (funciona offline); cotações sempre pela rede.
-const CACHE = 'carteira-v9';
-const SHELL = ['./', 'index.html', 'style.css?v=9', 'app.js?v=9', 'manifest.webmanifest', 'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png'];
+const CACHE = 'carteira-v10';
+const SHELL = ['./', 'index.html', 'style.css?v=10', 'app.js?v=10', 'manifest.webmanifest', 'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL.map((u) => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
