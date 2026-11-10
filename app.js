@@ -485,15 +485,6 @@ function renderInsights(ps, open, value, cost) {
   $('#composition').innerHTML = (open.length ? donut(items, tot, center) : '') + (top && top[1] / tot > 0.35 && items.length > 1 && mode !== 'classe'
     ? `<div class="note warn-t">Concentração: ${esc(top[0])} é ${pct0(top[1] / tot * 100)} da carteira.</div>` : '');
 
-  // ---- Resultado total + proventos
-  const realized = ps.reduce((s, p) => s + p.realized, 0);
-  const income = ps.reduce((s, p) => s + p.income, 0);
-  const unreal = value - cost;
-  const total = unreal + realized + income;
-  $('#result').innerHTML = `<div class="kv"><span>Lucro não realizado</span><b class="${cls(unreal)}">${signed(unreal)}</b></div>
-    <div class="kv"><span>Lucro realizado (vendas)</span><b class="${cls(realized)}">${signed(realized)}</b></div>
-    <div class="kv"><span>Proventos recebidos</span><b class="${cls(income)}">${signed(income)}</b></div>
-    <div class="kv total"><span>Resultado total</span><b class="${cls(total)}">${signed(total)}</b></div>`;
 
 
 }
@@ -600,8 +591,176 @@ function barChart(title, years, vals) {
   const max = Math.max(...vals.map((x) => Math.abs(x || 0)), 1e-9);
   const fmt = (x) => x == null ? '—' : Math.abs(x) >= 1000 ? `${dec(x / 1000)} bi` : `${dec(x, 0)} mi`;
   return `<div class="bars"><div class="bars-t">${title}</div><div class="bars-g">${vals.map((x, i) => `
-    <div class="bc"><em class="${x < 0 ? 'down' : ''}">${fmt(x)}</em><div class="bw"><div class="b ${x < 0 ? 'down' : ''}" style="height:${x == null ? 0 : Math.max(2, Math.abs(x) / max * 100).toFixed(1)}%"></div></div><span>${String(years[i]).slice(2)}</span></div>`).join('')}
+    <div class="bc" title="${years[i]}: ${fmt(x)}"><div class="bw"><div class="b ${x < 0 ? 'down' : ''}" style="height:${x == null ? 0 : Math.max(2, Math.abs(x) / max * 100).toFixed(1)}%"></div></div><span>${years[i]}</span></div>`).join('')}
   </div></div>`;
+}
+
+// ---- Análise (checklist) e histórico anual/trimestral
+const median = (a) => { const v = a.filter((x) => x != null && isFinite(x)).sort((x, y) => x - y); if (!v.length) return null; const m = v.length >> 1; return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2; };
+const sumN = (a) => a.every((x) => x != null) ? a.reduce((s, x) => s + x, 0) : null;
+
+// Séries por ano de uma ação (P/L pelo preço no fim de cada ano)
+function yearSeries(t) {
+  const [ei, , k, , px = []] = screener.tk[t];
+  const e = screener.emp[ei];
+  const n = screener.anos.length;
+  const out = { labels: screener.anos.map(String), lc: e.lc, r: e.r, eb: e.eb || [], dv: e.dv, roe: [], margin: [], ndEb: [], pe: [], dy: [] };
+  for (let i = 0; i < n; i++) {
+    const lc = e.lc[i], pl = e.pl[i], r = e.r[i], eb = e.eb?.[i], dl = e.dla?.[i];
+    const mc = px[i] != null && e.ac ? px[i] / k * e.ac : null; // valor de mercado no fim do ano (R$ mi)
+    out.roe.push(lc != null && pl > 0 ? lc / pl * 100 : null);
+    out.margin.push(!e.fin && r > 0 && lc != null ? lc / r * 100 : null);
+    out.ndEb.push(!e.fin && dl != null && eb > 0 ? dl / eb : null);
+    out.pe.push(mc && lc > 0 ? mc / lc : null);
+    out.dy.push(mc && e.dv[i] != null ? e.dv[i] / mc * 100 : null);
+  }
+  return out;
+}
+
+// Séries por trimestre (ROE, P/L e Dív./EBITDA usam os últimos 12 meses)
+function quarterSeries(t) {
+  const [ei, , k] = screener.tk[t];
+  const e = screener.emp[ei];
+  const q = tri?.emp[ei];
+  if (!q) return null;
+  const px = tri.px[t] || [];
+  const out = { labels: tri.tri.map((s) => s.slice(5) + 'T' + s.slice(2, 4)), lc: q.lc, r: q.r, eb: q.eb, roe: [], margin: [], ndEb: [], pe: [] };
+  for (let i = 0; i < q.lc.length; i++) {
+    const w = (a) => i >= 3 ? sumN(a.slice(i - 3, i + 1)) : null;
+    const lc12 = w(q.lc), eb12 = w(q.eb);
+    const mc = px[i] != null && e.ac ? px[i] / k * e.ac : null;
+    out.roe.push(lc12 != null && q.pl[i] > 0 ? lc12 / q.pl[i] * 100 : null);
+    out.margin.push(!e.fin && q.r[i] > 0 && q.lc[i] != null ? q.lc[i] / q.r[i] * 100 : null);
+    out.ndEb.push(!e.fin && q.dl[i] != null && eb12 > 0 ? q.dl[i] / eb12 : null);
+    out.pe.push(mc && lc12 > 0 ? mc / lc12 : null);
+  }
+  return out;
+}
+
+let tri = null, triLoading = null;
+function loadTri() {
+  if (tri || triLoading) return triLoading;
+  triLoading = fetch('data/tri.json', { cache: 'no-cache' }).then((r) => r.ok ? r.json() : null)
+    .then((j) => { tri = j; return j; }).catch(() => null).finally(() => { triLoading = null; });
+  return triLoading;
+}
+
+// P/L mediano do setor (empresas com lucro)
+function sectorPE(sector) {
+  buildRows();
+  const v = Object.values(screener.rows).filter((r) => r.sector === sector && r.pe > 0 && r.pe < 100);
+  const seen = new Set(), pes = [];
+  for (const r of v) if (!seen.has(r.emp)) { seen.add(r.emp); pes.push(r.pe); }
+  return pes.length >= 3 ? { pe: median(pes), n: pes.length } : null;
+}
+
+function analysis(t, v) {
+  const e = screener.emp[v.emp];
+  const s = yearSeries(t);
+  const items = [];
+  const add = (st, title, text) => items.push({ st, title, text });
+  const last = (a, n) => a.slice(-n);
+
+  // 1. Lucro crescente e consistente
+  const lcs = e.lc.map((x, i) => [x, i]).filter(([x]) => x != null);
+  if (lcs.length >= 3) {
+    let ups = 0;
+    for (let i = 1; i < lcs.length; i++) if (lcs[i][0] > lcs[i - 1][0]) ups++;
+    const losses = lcs.filter(([x]) => x <= 0).length;
+    const [a0, i0] = lcs[0], [a1, i1] = lcs[lcs.length - 1];
+    const cagr = a0 > 0 && a1 > 0 ? (Math.pow(a1 / a0, 1 / (i1 - i0)) - 1) * 100 : null;
+    const ratio = ups / (lcs.length - 1);
+    add(losses === 0 && ratio >= 0.6 && cagr > 0 ? 'ok' : cagr > 0 && losses <= 1 ? 'warn' : 'bad', 'Lucro crescente',
+      `Subiu em ${ups} de ${lcs.length - 1} anos (${screener.anos[i0]}–${screener.anos[i1]})` +
+      (cagr != null ? ` · ${cagr >= 0 ? '+' : ''}${dec(cagr)}% ao ano` : '') + (losses ? ` · ${losses} ano${losses > 1 ? 's' : ''} com prejuízo` : ''));
+  }
+
+  // 2. Dívida líquida / EBITDA
+  if (e.fin) add('na', 'Dívida líquida/EBITDA', 'Não se aplica a bancos e seguradoras.');
+  else {
+    const [nd] = lastNum(s.ndEb);
+    const [dl] = lastNum(e.dla || []);
+    if (dl != null && dl < 0) add('ok', 'Dívida líquida/EBITDA', 'Caixa maior que a dívida (caixa líquido).');
+    else if (nd != null) add(nd < 2 ? 'ok' : nd <= 3 ? 'warn' : 'bad', 'Dívida líquida/EBITDA', `${dec(nd, 2)}x · bom abaixo de 2–3x (varia por setor)`);
+    else add('na', 'Dívida líquida/EBITDA', 'EBITDA negativo ou sem dados.');
+  }
+
+  // 3. ROE acima de 15% de forma recorrente
+  const roes = last(s.roe, 5).filter((x) => x != null);
+  if (roes.length) {
+    const hi = roes.filter((x) => x >= 15).length;
+    add(hi >= 4 && roes[roes.length - 1] >= 15 ? 'ok' : hi >= 2 ? 'warn' : 'bad', 'ROE acima de 15%',
+      `Em ${hi} de ${roes.length} anos · último ${pct0(roes[roes.length - 1])} · média ${pct0(roes.reduce((a, b) => a + b, 0) / roes.length)}`);
+  }
+
+  // 4. Margens estáveis ou crescentes
+  if (!e.fin) {
+    const ms = last(s.margin, 5).filter((x) => x != null);
+    if (ms.length >= 3) {
+      const first = ms.slice(0, -1).reduce((a, b) => a + b, 0) / (ms.length - 1), lastM = ms[ms.length - 1];
+      const st = lastM <= 0 ? 'bad' : lastM >= first - 1 ? (lastM < 3 ? 'warn' : 'ok') : lastM >= first * 0.7 ? 'warn' : 'bad';
+      add(st, 'Margens', `Margem líquida ${pct0(lastM)} no último ano · média anterior ${pct0(first)}`);
+    }
+  }
+
+  // 5. P/L vs setor e vs histórico
+  if (v.pe != null) {
+    const sp = sectorPE(v.sector);
+    if (sp) add(v.pe <= sp.pe ? 'ok' : v.pe <= sp.pe * 1.3 ? 'warn' : 'bad', 'P/L vs setor',
+      `${dec(v.pe)} vs ${dec(sp.pe)} (mediana de ${sp.n} empresas de ${v.sector})`);
+    else add('info', 'P/L vs setor', `${dec(v.pe)} · poucas empresas no setor ${v.sector} para comparar`);
+    const hist = median(last(s.pe, 5));
+    if (hist) add(v.pe <= hist ? 'ok' : v.pe <= hist * 1.3 ? 'warn' : 'bad', 'P/L vs histórico',
+      `${dec(v.pe)} vs ${dec(hist)} (mediana dos últimos 5 anos)`);
+  } else add('bad', 'P/L', 'Sem lucro no último ano: P/L não se aplica.');
+
+  // 6. P/VP (mais útil para bancos e empresas com muitos ativos)
+  if (v.pvp != null) add(e.fin ? (v.pvp <= 1.5 ? 'ok' : v.pvp <= 2.5 ? 'warn' : 'bad') : 'info', 'P/VP',
+    `${dec(v.pvp, 2)}` + (e.fin ? ' · em bancos, abaixo de 1,5 costuma ser barato' : ' · mais útil para bancos e empresas com muitos ativos'));
+
+  // 7. Dividend yield (desconfiar de muito alto)
+  if (v.dy != null) {
+    const dvs = last(e.dv, 4).filter((x) => x != null);
+    const spike = dvs.length >= 3 && dvs[dvs.length - 1] > 2 * median(dvs.slice(0, -1));
+    add(v.dy > 12 || spike ? 'warn' : v.dy >= 4 ? 'ok' : 'info', 'Dividend yield',
+      `${pct0(v.dy)}` + (v.dy > 12 ? ' · muito alto: pode ser pontual ou sinal de problema' : spike ? ' · último ano bem acima da média (pode não se repetir)' : v.dy >= 4 ? ' · bom para renda' : ' · baixo para quem busca renda'));
+  }
+
+  const icon = { ok: '✓', warn: '!', bad: '✕', info: 'i', na: '–' };
+  return `<h3 class="sub">Análise <small>balanço ${v.year} · CVM</small></h3><div class="card ana">
+    ${items.map((x) => `<div class="ck ${x.st}"><i>${icon[x.st]}</i><div><b>${x.title}</b><span>${esc(x.text)}</span></div></div>`).join('')}
+    <div class="note">Regras de bolso para estudo, não é recomendação.</div></div>`;
+}
+
+let histMode = 'ano';
+const scrollHist = () => document.querySelectorAll('#posBody .htab').forEach((el) => (el.scrollLeft = el.scrollWidth));
+function histBlock(t, v) {
+  const e = screener.emp[v.emp];
+  const s = histMode === 'tri' ? (tri ? quarterSeries(t) : null) : yearSeries(t);
+  const seg = `<div class="seg small" id="histSeg">
+    <label><input type="radio" name="hm" value="ano"${histMode === 'ano' ? ' checked' : ''}><span>Anual</span></label>
+    <label><input type="radio" name="hm" value="tri"${histMode === 'tri' ? ' checked' : ''}><span>Trimestral</span></label></div>`;
+  if (!s) return `<h3 class="sub">Histórico</h3>${seg}<div class="card"><div class="note">${histMode === 'tri' && !tri ? 'Carregando trimestres…' : 'Sem dados trimestrais desta empresa.'}</div></div>`;
+  const big = (x) => x == null ? '—' : Math.abs(x) >= 1000 ? `${dec(x / 1000)} bi` : `${dec(x, 0)} mi`;
+  const p0 = (x) => x == null ? '—' : dec(x, 0) + '%';
+  const tri_ = histMode === 'tri';
+  const rows = [
+    ['Lucro líquido', s.lc, big],
+    ...(e.fin ? [] : [['Receita', s.r, big], ['EBITDA', s.eb, big], ['Margem líq.', s.margin, p0]]),
+    [tri_ ? 'ROE 12m' : 'ROE', s.roe, p0],
+    ...(e.fin ? [] : [[tri_ ? 'Dív.líq./EBITDA 12m' : 'Dív.líq./EBITDA', s.ndEb, (x) => dec(x)]]),
+    [tri_ ? 'P/L 12m' : 'P/L', s.pe, (x) => dec(x)],
+    ...(tri_ ? [] : [['DY', s.dy, (x) => x == null ? '—' : dec(x) + '%'], ['Dividendos', s.dv, big]]),
+  ];
+  const n = s.labels.length;
+  const table = `<div class="htab"><table><thead><tr><th></th>${s.labels.map((l) => `<th>${l}</th>`).join('')}</tr></thead><tbody>
+    ${rows.map(([l, a, f]) => `<tr><th>${l}</th>${Array.from({ length: n }, (_, i) => `<td class="${a[i] < 0 ? 'down' : ''}">${f(a[i])}</td>`).join('')}</tr>`).join('')}
+    </tbody></table></div>`;
+  const lab = s.labels.map((l) => tri_ ? l : l.slice(2));
+  return `<h3 class="sub">Histórico <small>${tri_ ? 'por trimestre' : 'por ano'}</small></h3>${seg}
+    <div class="card">${barChart('Lucro líquido', lab, s.lc)}${e.fin ? '' : barChart('Receita', lab, s.r) + barChart('EBITDA', lab, s.eb)}
+      ${table}
+      <div class="note">${tri_ ? 'Trimestre de 3 meses (o 4º = ano − 9 meses). ROE, Dív./EBITDA e P/L usam os últimos 12 meses.' : 'P/L e DY de cada ano usam o preço no fim do ano.'} Fonte: CVM; preços: Yahoo Finance.</div></div>`;
 }
 
 function drawAsset(ticker, p, h) {
@@ -656,10 +815,10 @@ function drawAsset(ticker, p, h) {
       <div class="grid three">
         ${cellv('P/L', dec(v.pe))}${cellv('P/VP', dec(v.pvp, 2))}${cellv('ROE', v.roe == null ? '—' : pct0(v.roe))}
         ${cellv('Margem líq.', v.margin == null ? '—' : pct0(v.margin))}${cellv('Div. Yield', v.dy == null ? '—' : pct0(v.dy))}
-        ${cellv('Dív. líq./PL', v.fin ? 'n/a' : dec(v.debt, 2))}
+        ${cellv('Dív.líq./EBITDA', v.fin ? 'n/a' : (() => { const [x] = lastNum(yearSeries(ticker).ndEb); return x == null ? '—' : dec(x, 2) + 'x'; })())}
       </div>
-      <div class="card">${barChart('Lucro líquido', screener.anos, e.lc)}${e.fin ? '' : barChart('Receita', screener.anos, e.r)}${barChart('Dividendos e JCP pagos', screener.anos, e.dv)}
-        <div class="note">Fonte: demonstrações anuais entregues à CVM.</div></div>`;
+      ${analysis(ticker, v)}
+      <div id="histBox">${histBlock(ticker, v)}</div>`;
   }
 
   // Proventos por ação (brapi)
@@ -689,6 +848,7 @@ function drawAsset(ticker, p, h) {
   }
   $('#posBody').innerHTML = html;
   $('#posBody').dataset.t = ticker;
+  scrollHist();
 }
 
 function txRow(t) {
@@ -1104,6 +1264,14 @@ document.querySelectorAll('input[name=comp]').forEach((i) => i.addEventListener(
 ['#scrSearch', '#scrSector', '#scrSort'].forEach((s) => $(s).addEventListener('input', renderScreener));
 $('#scrMethods').addEventListener('change', renderScreener);
 $('#scrAdv').addEventListener('change', renderScreener);
+$('#posBody').addEventListener('change', async (ev) => {
+  if (ev.target.name !== 'hm') return;
+  histMode = ev.target.value;
+  const t = $('#posBody').dataset.t, box = $('#histBox'), v = valuation(t);
+  if (!box || !v) return;
+  box.innerHTML = histBlock(t, v); scrollHist();
+  if (histMode === 'tri' && !tri) { await loadTri(); if ($('#posBody').dataset.t === t && $('#histBox')) $('#histBox').innerHTML = histBlock(t, v); scrollHist(); }
+});
 $('#advClear').onclick = () => { document.querySelectorAll('#scrAdv select').forEach((x) => (x.value = '')); $('#fNoLoss').checked = false; renderScreener(); };
 
 $('#formTx').addEventListener('submit', (e) => {
