@@ -99,7 +99,8 @@ const brl = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' 
 const num = new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 8 });
 const pct = (v) => (v > 0 ? '+' : '') + v.toFixed(2).replace('.', ',') + '%';
 const pct0 = (v) => v.toFixed(1).replace('.', ',') + '%';
-const money = (v) => brl.format(v);
+const brlSmall = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL', maximumSignificantDigits: 4 });
+const money = (v) => v && Math.abs(v) < 1 ? brlSmall.format(v) : brl.format(v);
 const signed = (v) => (v > 0 ? '+' : '') + brl.format(v);
 const cls = (v) => (v > 0.0001 ? 'up' : v < -0.0001 ? 'down' : '');
 const parseNum = (s) => {
@@ -226,6 +227,74 @@ async function publicQuotes(tickers) {
   return out;
 }
 
+// ---- Cripto: CoinGecko (grátis, sem cadastro), com Binance de reserva
+const CG = 'https://api.coingecko.com/api/v3';
+const CG_IDS = {
+  BTC: 'bitcoin', ETH: 'ethereum', SOL: 'solana', USDT: 'tether', USDC: 'usd-coin', BNB: 'binancecoin', XRP: 'ripple',
+  ADA: 'cardano', DOGE: 'dogecoin', TRX: 'tron', DOT: 'polkadot', POL: 'polygon-ecosystem-token', LTC: 'litecoin',
+  LINK: 'chainlink', AVAX: 'avalanche-2', SHIB: 'shiba-inu', TON: 'the-open-network', BCH: 'bitcoin-cash', XLM: 'stellar',
+  ATOM: 'cosmos', UNI: 'uniswap', NEAR: 'near', APT: 'aptos', ARB: 'arbitrum', OP: 'optimism', SUI: 'sui', PEPE: 'pepe',
+  DAI: 'dai', ETC: 'ethereum-classic', HBAR: 'hedera-hashgraph', FIL: 'filecoin', ICP: 'internet-computer', AAVE: 'aave',
+  RENDER: 'render-token', INJ: 'injective-protocol', FET: 'fetch-ai', BRZ: 'brz', WLD: 'worldcoin-wld', HYPE: 'hyperliquid',
+  TRUMP: 'official-trump', BONK: 'bonk', XMR: 'monero', ALGO: 'algorand', VET: 'vechain', SAND: 'the-sandbox', MANA: 'decentraland',
+};
+const KEY_CGIDS = 'carteira.cgids';
+let cgIds = load(KEY_CGIDS, {});
+const isCrypto = (t) => classOf(t) === 'cripto';
+
+async function cgId(sym) {
+  if (CG_IDS[sym]) return CG_IDS[sym];
+  if (cgIds[sym]) return cgIds[sym];
+  const r = await fetch(`${CG}/search?query=${encodeURIComponent(sym)}`);
+  if (!r.ok) throw new Error(r.status === 429 ? 'muitas consultas, tente em 1 min' : 'HTTP ' + r.status);
+  const j = await r.json();
+  const c = (j.coins || []).filter((x) => x.symbol?.toUpperCase() === sym)
+    .sort((a, b) => (a.market_cap_rank ?? 1e9) - (b.market_cap_rank ?? 1e9))[0];
+  if (!c) throw new Error('cripto não encontrada');
+  cgIds[sym] = c.id; save(KEY_CGIDS, cgIds);
+  return c.id;
+}
+
+const fromPct = (price, pctCh, name, logo) => ({
+  price, change: price - price / (1 + (pctCh || 0) / 100), changePct: pctCh || 0, time: null, name, logo: logo || '', fetchedAt: Date.now(),
+});
+
+async function cryptoQuotes(syms) {
+  const out = {}, ids = {};
+  for (const s of syms) { try { ids[s] = await cgId(s); } catch (e) { out[s] = e; } }
+  const list = Object.values(ids);
+  if (list.length) {
+    try {
+      const r = await fetch(`${CG}/coins/markets?vs_currency=brl&price_change_percentage=24h&ids=${list.join(',')}`);
+      if (!r.ok) throw new Error(r.status === 429 ? 'muitas consultas, tente em 1 min' : 'HTTP ' + r.status);
+      const by = new Map((await r.json()).map((c) => [c.id, c]));
+      for (const [s, id] of Object.entries(ids)) {
+        const c = by.get(id);
+        if (c?.current_price != null) out[s] = fromPct(c.current_price, c.price_change_percentage_24h, c.name, c.image);
+      }
+    } catch {}
+  }
+  // reserva: Binance (pares em real)
+  for (const s of syms) {
+    if (out[s] && !(out[s] instanceof Error)) continue;
+    try {
+      const r = await fetch(`https://api.binance.com/api/v3/ticker/24hr?symbol=${s}BRL`);
+      const j = await r.json();
+      if (!r.ok || !j.lastPrice) throw new Error('sem cotação');
+      out[s] = fromPct(+j.lastPrice, +j.priceChangePercent, quotes[s]?.name || s, quotes[s]?.logo);
+    } catch (e) { if (!out[s]) out[s] = e; }
+  }
+  return out;
+}
+
+async function cryptoHistory(sym) {
+  const id = await cgId(sym);
+  const r = await fetch(`${CG}/coins/${id}/market_chart?vs_currency=brl&days=365&interval=daily`);
+  if (!r.ok) throw new Error('sem histórico');
+  const j = await r.json();
+  return { at: Date.now(), prices: (j.prices || []).map(([t, c]) => ({ t, c })), divs: [] };
+}
+
 let refreshing = false;
 async function refreshQuotes(manual = false) {
   if (refreshing) return;
@@ -234,10 +303,18 @@ async function refreshQuotes(manual = false) {
   refreshing = true;
   $('#btnRefresh').classList.add('spin');
   const errors = [];
-  let todo = tickers;
-  if (token) {
-    await Promise.all(tickers.map(async (t) => { try { quotes[t] = toQuote(await brapi(t), t); } catch {} }));
-    todo = tickers.filter((t) => !quotes[t] || Date.now() - quotes[t].fetchedAt > 60_000);
+  const coins = tickers.filter(isCrypto);
+  if (coins.length) {
+    const got = await cryptoQuotes(coins);
+    for (const t of coins) {
+      if (got[t] instanceof Error || !got[t]) errors.push(`${t}: ${got[t]?.message || 'sem cotação'}`);
+      else quotes[t] = got[t];
+    }
+  }
+  let todo = tickers.filter((t) => !isCrypto(t));
+  if (token && todo.length) {
+    await Promise.all(todo.map(async (t) => { try { quotes[t] = toQuote(await brapi(t), t); } catch {} }));
+    todo = todo.filter((t) => !quotes[t] || Date.now() - quotes[t].fetchedAt > 60_000);
   }
   if (todo.length) {
     const got = await publicQuotes(todo);
@@ -256,6 +333,7 @@ async function refreshQuotes(manual = false) {
 const histCache = {};
 async function fetchHistory(ticker) {
   if (histCache[ticker] && Date.now() - histCache[ticker].at < 30 * 60_000) return histCache[ticker];
+  if (isCrypto(ticker)) return (histCache[ticker] = await cryptoHistory(ticker));
   let q = null;
   for (const range of ['1y', '6mo', '3mo']) {
     try { q = await brapi(ticker, { range, interval: '1d', dividends: 'true' }); if (q.historicalDataPrice?.length) break; }
@@ -359,9 +437,9 @@ function valuation(ticker) {
 // =====================================================================
 // Classes de ativo
 // =====================================================================
-const CLASSES = { acao: 'Ações', fii: 'FIIs', etf: 'ETFs', bdr: 'BDRs', outro: 'Outros' };
-const CLASS_ONE = { acao: 'Ação', fii: 'FII', etf: 'ETF', bdr: 'BDR', outro: 'Outro' };
-const CLASS_COLOR = { acao: '#3b82f6', fii: '#f59e0b', etf: '#22c55e', bdr: '#a855f7', outro: '#8b93a1' };
+const CLASSES = { acao: 'Ações', fii: 'FIIs', etf: 'ETFs', bdr: 'BDRs', cripto: 'Cripto', outro: 'Outros' };
+const CLASS_ONE = { acao: 'Ação', fii: 'FII', etf: 'ETF', bdr: 'BDR', cripto: 'Cripto', outro: 'Outro' };
+const CLASS_COLOR = { acao: '#3b82f6', fii: '#f59e0b', etf: '#22c55e', bdr: '#a855f7', cripto: '#f97316', outro: '#8b93a1' };
 const KNOWN_ETF = new Set(('BOVA11 BOVV11 BOVX11 BOVB11 BRAX11 SMAL11 SMAC11 IVVB11 SPXI11 NASD11 HASH11 QBTC11 BITH11 ETHE11 QETH11 ' +
   'GOLD11 IMAB11 IRFM11 B5P211 FIXA11 DIVO11 ECOO11 ISUS11 MATB11 PIBB11 XBOV11 BBSD11 GOVE11 FIND11 ACWI11 ' +
   'EURP11 XINA11 TECK11 WRLD11 BDIV11 NSDV11 USDB11 DEBB11 IB5M11 LFTS11 B5MB11 IMBB11 AUPO11 META11 SPXR11').split(' '));
@@ -371,6 +449,7 @@ function guessClass(t) {
   if (/^[A-Z]{4}3[2-5]$/.test(t)) return 'bdr';
   if (/^[A-Z]{4}11$/.test(t)) return 'fii';
   if (/^[A-Z0-9]{4}([3-8])$/.test(t)) return 'acao';
+  if (/^[A-Z][A-Z0-9]{1,9}$/.test(t) && !/d$/.test(t)) return 'cripto'; // B3 sempre termina em número
   return 'outro';
 }
 const classOf = (t) => classes[t] || guessClass(t);
@@ -438,7 +517,7 @@ function render() {
       <span>${money(v)}${multi ? ` · ${pct0(share)}` : ''}</span></div>${list.map(posHtml).join('')}</div>`;
   }).join('');
 
-  $('#tickerList').innerHTML = [...new Set([...ps.map((p) => p.ticker), ...Object.keys(screener?.rows || {})])]
+  $('#tickerList').innerHTML = [...new Set([...ps.map((p) => p.ticker), ...Object.keys(screener?.rows || {}), ...Object.keys(CG_IDS)])]
     .map((t) => `<option value="${esc(t)}">`).join('');
 
   renderInsights(ps, open, value, cost);
@@ -588,7 +667,7 @@ async function openAsset(ticker) {
     const h = await fetchHistory(ticker);
     if ($('#dlgPos').open && $('#posBody').dataset.t === ticker) drawAsset(ticker, positions().find((x) => x.ticker === ticker), h);
   } catch {
-    const el = $('#chart'); if (el) el.innerHTML = '<div class="note">Histórico indisponível (confira o token em ⚙).</div>';
+    const el = $('#chart'); if (el) el.innerHTML = (isCrypto(ticker) ? '<div class="note">Histórico indisponível agora (tente em 1 min).</div>' : '<div class="note">Histórico indisponível (confira o token em ⚙).</div>');
   }
 }
 
@@ -1096,13 +1175,22 @@ function parseQuick(text) {
   else if (/\b(compr|compra|adquiri|aport)/.test(s)) out.type = 'buy';
   const tk = s.match(/\b([a-z]{4}\d{1,2}f?)\b/);
   if (tk) out.ticker = tk[1].toUpperCase().replace(/^([A-Z]{4}\d{1,2})F$/, '$1');
-  const n = '(\\d{1,3}(?:\\.\\d{3})*(?:,\\d+)?|\\d+(?:[.,]\\d+)?)';
+  // cripto: símbolo (btc) ou nome (bitcoin)
+  let coinRe = null;
+  if (!tk) {
+    const names = {};
+    for (const [k, v] of Object.entries(CG_IDS)) names[v.split('-')[0]] ??= k; // ethereum = ETH, não ETC
+    const alt = [...Object.keys(CG_IDS).map((k) => k.toLowerCase()), ...Object.keys(names)].join('|');
+    const c = s.match(new RegExp(`\\b(${alt})s?\\b`));
+    if (c) { out.ticker = names[c[1]] || c[1].toUpperCase(); coinRe = c[1]; }
+  }
+  const n = '(\\d{1,3}(?:\\.\\d{3})+(?:,\\d+)?|\\d+(?:[.,]\\d+)?)';
   if (out.type === 'income') {
     const m = s.match(new RegExp(`(?:receb\\w*|de)\\s+${n}`)) || s.match(new RegExp(n));
     if (m) out.amount = parseNum(m[1]);
     if (/jcp|juros sobre/.test(s)) out.kind = 'JCP'; else if (/rendimento/.test(s)) out.kind = 'Rendimento'; else out.kind = 'Dividendo';
   } else {
-    const q = s.match(new RegExp(`${n}\\s*(?:acoes|acao|cotas?|papeis)?\\s*(?:de\\s+)?[a-z]{4}\\d`));
+    const q = s.match(new RegExp(`${n}\\s*(?:acoes|acao|cotas?|papeis)?\\s*(?:de\\s+)?${coinRe || '[a-z]{4}\\d'}`));
     if (q) out.qty = parseNum(q[1]);
     const pr = s.match(new RegExp(`(?:\\ba\\b|\\bpor\\b|@|cada|preco)\\s*${n}`));
     if (pr) out.price = parseNum(pr[1]);
@@ -1412,7 +1500,7 @@ $('#formTx').addEventListener('submit', (e) => {
   const f = e.target;
   const ticker = normTicker(f.ticker.value);
   const type = f.type.value;
-  if (!/^[A-Z0-9]{4,8}$/.test(ticker)) return toast('Código inválido (ex.: PETR4)');
+  if (!/^[A-Z0-9]{2,10}$/.test(ticker)) return toast('Código inválido (ex.: PETR4 ou BTC)');
   if (type === 'income') {
     const amount = parseNum(f.amount.value);
     if (amount <= 0) return toast('Informe o valor recebido');
