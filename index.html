@@ -12,7 +12,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="apple-touch-icon" href="icons/icon-180.png">
   <link rel="icon" href="icons/icon-192.png">
-  <link rel="stylesheet" href="style.css?v=14">
+  <link rel="stylesheet" href="style.css?v=16">
 </head>
 <body>
   <header class="top">
@@ -40,6 +40,10 @@
     <p id="empty" class="empty hidden">Nenhum ativo ainda.<br>Toque em <b>+</b> para registrar uma compra<br>ou <a href="#" id="emptyImport">importe as planilhas da B3</a>.</p>
 
     <section id="insights" class="hidden">
+      <h2 class="sec">Evolução do patrimônio</h2>
+      <div class="card" id="evoBox"></div>
+      <h2 class="sec">Metas e aporte</h2>
+      <div class="card" id="goalsBox"></div>
       <h2 class="sec">Composição</h2>
       <div class="seg small three" id="compSeg">
         <label><input type="radio" name="comp" value="ativo" checked><span>Por ativo</span></label>
@@ -67,7 +71,8 @@
       </select>
     </div>
     <div class="chips" id="scrMethods">
-      <label><input type="checkbox" id="scrGood"><span>★ Boas empresas</span></label>
+      <label><input type="checkbox" id="scrGood"><span>✓ Boas empresas</span></label>
+      <label><input type="checkbox" id="scrFav"><span>★ Favoritos</span></label>
       <label><input type="checkbox" id="scrLiquid" checked><span>Com liquidez</span></label>
       <label><input type="checkbox" value="graham"><span>Graham</span></label>
       <label><input type="checkbox" value="bazin"><span>Bazin</span></label>
@@ -103,12 +108,19 @@
       Divergência não garante alta: confira a análise de cada ação. <b>Não é recomendação de investimento.</b></p>
   </main>
 
+  <!-- Aba Favoritas -->
+  <main id="tabFavoritas" class="hidden">
+    <div id="favList" class="list"></div>
+    <p id="favEmpty" class="empty hidden">Nenhuma ação favorita ainda.<br>Toque na <b>☆</b> de uma ação no Screener,<br>em Oportunidades ou na análise.</p>
+  </main>
+
   <button id="btnAdd" class="fab" aria-label="Nova operação">+</button>
 
   <nav class="tabbar">
     <button data-tab="Carteira" class="on"><span>◔</span>Carteira</button>
     <button data-tab="Screener"><span>☰</span>Screener</button>
     <button data-tab="Oportunidades"><span>⇅</span>Oportunidades</button>
+    <button data-tab="Favoritas"><span>★</span>Favoritas</button>
   </nav>
 
   <!-- Nova operação -->
@@ -193,6 +205,16 @@
   </dialog>
 
   <!-- Ajustes -->
+  <dialog id="dlgGoals" class="sheet">
+    <h2>Metas por classe</h2>
+    <p class="hint">Quanto da carteira você quer em cada classe. Precisa somar 100%.</p>
+    <div id="goalsForm"></div>
+    <div class="actions">
+      <button type="button" class="btn ghost" id="goalsClear">Apagar metas</button>
+      <button type="button" class="btn primary" id="goalsSave">Salvar</button>
+    </div>
+  </dialog>
+
   <dialog id="dlgSettings" class="sheet">
     <form id="formSettings" method="dialog">
       <h2>Ajustes</h2>
@@ -231,6 +253,6 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js?v=14"></script>
+  <script src="app.js?v=16"></script>
 </body>
 </html>

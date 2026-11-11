@@ -8,13 +8,15 @@ const KEY_QUOTES = 'carteira.quotes.v1';
 const KEY_TOKEN = 'carteira.token';
 const KEY_SCREENER = 'carteira.screener.v1';
 const KEY_CLASSES = 'carteira.classes.v1';
+const KEY_FAVS = 'carteira.favs.v1';
+const KEY_GOALS = 'carteira.goals.v1';
 
 function load(key, fallback) {
   try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; }
   catch { return fallback; }
 }
 // Dados do usuário (não dá para buscar de novo) ficam também no IndexedDB, como cópia de segurança.
-const KEEP = [KEY_TX, KEY_CLASSES, KEY_TOKEN];
+const KEEP = [KEY_TX, KEY_CLASSES, KEY_TOKEN, KEY_FAVS, KEY_GOALS];
 function save(key, value) {
   const s = JSON.stringify(value);
   try { localStorage.setItem(key, s); }
@@ -64,6 +66,7 @@ async function syncBackupStore() {
   }
   if (restored) {
     txs = load(KEY_TX, []); classes = load(KEY_CLASSES, {}); token = load(KEY_TOKEN, '');
+    favs = new Set(load(KEY_FAVS, [])); goals = load(KEY_GOALS, {});
     mergeFractional();
     render(); refreshQuotes();
     toast('Dados recuperados');
@@ -89,6 +92,8 @@ let txs = load(KEY_TX, []);
 let quotes = load(KEY_QUOTES, {});
 let token = load(KEY_TOKEN, '');
 let screener = load(KEY_SCREENER, null); // {fetchedAt, rodada, rows: {TICKER: {...}}}
+let favs = new Set(load(KEY_FAVS, []));   // códigos favoritos
+let goals = load(KEY_GOALS, {});          // {classe: % meta}
 let classes = load(KEY_CLASSES, {});    // {TICKER: 'acao'|'fii'|'etf'|'bdr'|'outro'}
 mergeFractional();
 
@@ -298,7 +303,7 @@ async function cryptoHistory(sym) {
 let refreshing = false;
 async function refreshQuotes(manual = false) {
   if (refreshing) return;
-  const tickers = [...new Set(positions().filter((p) => p.qty > 0).map((p) => p.ticker))];
+  const tickers = [...new Set([...positions().filter((p) => p.qty > 0).map((p) => p.ticker), ...favs])];
   if (!tickers.length) return;
   refreshing = true;
   $('#btnRefresh').classList.add('spin');
@@ -521,6 +526,7 @@ function render() {
     .map((t) => `<option value="${esc(t)}">`).join('');
 
   renderInsights(ps, open, value, cost);
+  renderFavs();
 }
 
 function posHtml(p) {
@@ -561,12 +567,195 @@ function renderInsights(ps, open, value, cost) {
     .map(([k, v], i) => mode === 'classe' ? [CLASSES[k], v, CLASS_COLOR[k]] : [k, v, PALETTE[i % PALETTE.length]]);
   const top = items[0];
   const center = { ativo: items.length === 1 ? 'ativo' : 'ativos', classe: items.length === 1 ? 'classe' : 'classes', setor: items.length === 1 ? 'setor' : 'setores' }[mode];
+  lastOpen = open; lastValue = value;
+  renderGoals(open, value);
+  renderEvolution();
   $('#composition').innerHTML = (open.length ? donut(items, tot, center) : '') + (top && top[1] / tot > 0.35 && items.length > 1 && mode !== 'classe'
     ? `<div class="note warn-t">Concentração: ${esc(top[0])} é ${pct0(top[1] / tot * 100)} da carteira.</div>` : '');
 
 
 
 }
+let lastOpen = [], lastValue = 0;
+// =====================================================================
+// Favoritos
+// =====================================================================
+function favStar(t) {
+  return `<span class="fav${favs.has(t) ? ' on' : ''}" data-fav="${esc(t)}" role="button" aria-label="Favoritar ${esc(t)}">${favs.has(t) ? '★' : '☆'}</span>`;
+}
+function toggleFav(t) {
+  if (favs.has(t)) favs.delete(t); else favs.add(t);
+  save(KEY_FAVS, [...favs]);
+  document.querySelectorAll(`[data-fav="${CSS.escape(t)}"]`).forEach((el) => { el.classList.toggle('on', favs.has(t)); el.textContent = favs.has(t) ? '★' : '☆'; });
+  renderFavs();
+  if (tab === 'Screener' && $('#scrFav').checked) renderScreener();
+  if (favs.has(t) && !quotes[t]) refreshQuotes();
+}
+function renderFavs() {
+  const owned = new Set(positions().filter((p) => p.qty > 0).map((p) => p.ticker));
+  const list = [...favs].sort();
+  $('#favEmpty').classList.toggle('hidden', list.length > 0);
+  $('#favList').innerHTML = list.map((t) => {
+    const q = quotes[t], v = screener?.tk?.[t] ? valuation(t) : null;
+    return `<button class="pos fav-row" data-t="${esc(t)}">${logoHtml(t)}
+      <div class="mid"><div class="t">${esc(t)}${q ? `<span class="now">${money(q.price)}</span><span class="chip ${cls(q.changePct)}">${pct(q.changePct)}</span>` : ''}</div>
+        <div class="s">${owned.has(t) ? '<span class="chip own">na carteira</span> ' : ''}${v ? `P/L ${dec(v.pe)} · ROE ${v.roe == null ? '—' : pct0(v.roe)} · DY ${v.dy == null ? '—' : pct0(v.dy)}` : esc(q?.name || '')}</div></div>
+      ${favStar(t)}</button>`;
+  }).join('');
+}
+
+// =====================================================================
+// Metas por classe e divisão do aporte
+// =====================================================================
+function goalSplit(open, value, amount) {
+  const cur = {};
+  for (const p of open) { const c = classOf(p.ticker); cur[c] = (cur[c] || 0) + (p.value ?? p.cost); }
+  const total = value + amount;
+  const cls_ = Object.keys(goals).filter((c) => goals[c] > 0);
+  const need = Object.fromEntries(cls_.map((c) => [c, Math.max(0, goals[c] / 100 * total - (cur[c] || 0))]));
+  const S = Object.values(need).reduce((a, b) => a + b, 0);
+  const alloc = {};
+  for (const c of cls_) alloc[c] = S > amount ? need[c] * amount / S : need[c] + (amount - S) * goals[c] / 100;
+  // dentro da classe: leva os ativos para pesos iguais
+  const per = {};
+  for (const c of cls_) {
+    if (!(alloc[c] > 0.5)) continue;
+    const ps = open.filter((p) => classOf(p.ticker) === c);
+    if (!ps.length) { per[c] = []; continue; }
+    const tgt = ((cur[c] || 0) + alloc[c]) / ps.length;
+    const nd = ps.map((p) => [p, Math.max(0, tgt - (p.value ?? p.cost))]);
+    const s = nd.reduce((a, [, x]) => a + x, 0) || 1;
+    per[c] = nd.map(([p, x]) => [p, x / s * alloc[c]]).filter(([, x]) => x >= 1).sort((a, b) => b[1] - a[1]);
+  }
+  return { cur, alloc, per, cls: cls_ };
+}
+
+function renderGoals(open, value) {
+  const box = $('#goalsBox');
+  const sum = Object.values(goals).reduce((a, b) => a + (+b || 0), 0);
+  if (!sum) {
+    box.innerHTML = `<div class="note">Defina quanto quer em cada classe (ex.: 60% ações, 25% FIIs, 15% cripto). O app mostra se a carteira está fora da meta e como dividir cada aporte.</div>
+      <button type="button" class="btn ghost small-btn" id="goalsEdit">Definir metas</button>`;
+    return;
+  }
+  const amount = parseNum($('#aporte')?.value || '') || 0;
+  const g = goalSplit(open, value, amount);
+  const rows = Object.keys(CLASSES).filter((c) => goals[c] > 0 || g.cur[c]).map((c) => {
+    const now = value ? (g.cur[c] || 0) / value * 100 : 0, goal = goals[c] || 0, diff = now - goal;
+    return `<div class="gl-row"><span><i style="background:${CLASS_COLOR[c]}"></i>${CLASSES[c]}</span>
+      <div class="gl-bar"><div style="width:${Math.min(100, now).toFixed(1)}%;background:${CLASS_COLOR[c]}"></div><b style="left:${Math.min(100, goal)}%"></b></div>
+      <em>${pct0(now)} <small>/ ${dec(goal, 0)}%</small></em><em class="${Math.abs(diff) < 2 ? '' : diff > 0 ? 'up' : 'down'}">${Math.abs(diff) < 2 ? 'ok' : (diff > 0 ? '+' : '') + dec(diff, 0) + ' pp'}</em></div>`;
+  }).join('');
+  const sugg = () => {
+    buildRows();
+    return Object.values(screener?.rows || {}).filter((r) => r.vol >= 1 && gradeOf(r).good).slice(0, 3).map((r) => r.ticker);
+  };
+  const split = amount > 0 ? `<div class="split">${g.cls.filter((c) => g.alloc[c] >= 1).sort((a, b) => g.alloc[b] - g.alloc[a]).map((c) => `
+      <div class="sp-c"><div class="sp-h"><span><i style="background:${CLASS_COLOR[c]}"></i>${CLASSES[c]}</span><b>${money(g.alloc[c])}</b></div>
+      ${(g.per[c] || []).map(([p, x]) => { const pr = p.quote?.price; const n = pr ? x / pr : null;
+        return `<div class="sp-a"><span>${esc(p.ticker)}</span><span>${money(x)}${n ? ` <small>≈ ${c === 'cripto' ? num.format(+n.toPrecision(3)) : Math.floor(n)} ${c === 'cripto' ? '' : Math.floor(n) === 1 ? 'cota' : 'cotas'}</small>` : ''}</span></div>`; }).join('')}
+      ${g.per[c] && !g.per[c].length ? `<div class="sp-a muted">Você não tem ${CLASSES[c]}. ${c === 'acao' && sugg().length ? 'Boas empresas hoje: ' + sugg().join(', ') : 'Escolha um ativo.'}</div>` : ''}
+      </div>`).join('')}<div class="note">Leva cada classe para perto da meta e, dentro dela, os ativos para pesos iguais.</div></div>` : '';
+  const keep = document.activeElement?.id === 'aporte';
+  box.innerHTML = `${rows}
+    <label class="field aporte">Quanto vai aportar agora?<input id="aporte" type="text" inputmode="decimal" placeholder="R$ 1.000,00" value="${esc($('#aporte')?.value || '')}"></label>
+    ${split}
+    <button type="button" class="btn ghost small-btn" id="goalsEdit">Editar metas</button>`;
+  if (keep) { const a = $('#aporte'); a.focus(); a.setSelectionRange(a.value.length, a.value.length); }
+}
+
+function openGoals() {
+  $('#goalsForm').innerHTML = Object.keys(CLASSES).map((c) => `<label class="gf"><span><i style="background:${CLASS_COLOR[c]}"></i>${CLASSES[c]}</span>
+    <input type="number" inputmode="decimal" min="0" max="100" step="1" name="${c}" value="${goals[c] || ''}" placeholder="0"> %</label>`).join('') +
+    '<div class="note" id="goalsSum"></div>';
+  updateGoalsSum();
+  showDialog('#dlgGoals');
+}
+function updateGoalsSum() {
+  const s = [...document.querySelectorAll('#goalsForm input')].reduce((a, i) => a + (+i.value || 0), 0);
+  $('#goalsSum').innerHTML = `Total: <b class="${Math.abs(s - 100) < 0.01 ? 'up' : 'down'}">${dec(s, 0)}%</b>${Math.abs(s - 100) < 0.01 ? '' : ' (precisa somar 100%)'}`;
+  $('#goalsSave').disabled = Math.abs(s - 100) >= 0.01;
+}
+
+// =====================================================================
+// Evolução do patrimônio (mês a mês)
+// =====================================================================
+let mensal = null, mensalLoading = null;
+function loadMensal() {
+  if (mensal || mensalLoading) return mensalLoading;
+  mensalLoading = fetch('data/mensal.json', { cache: 'no-cache' }).then((r) => r.ok ? r.json() : null)
+    .then((j) => { mensal = j; return j; }).catch(() => null).finally(() => { mensalLoading = null; });
+  return mensalLoading;
+}
+
+function evolution() {
+  const txsS = sortedTxs().filter((t) => t.type !== 'income');
+  if (!txsS.length) return null;
+  const first = txsS[0].date.slice(0, 7);
+  const nowM = todayIso().slice(0, 7);
+  const months = [];
+  for (let [y, m] = first.split('-').map(Number); `${y}-${String(m).padStart(2, '0')}` <= nowM; m === 12 ? (y++, m = 1) : m++) months.push(`${y}-${String(m).padStart(2, '0')}`);
+  const mIdx = mensal ? Object.fromEntries(mensal.meses.map((m, i) => [m, i])) : {};
+  const hold = {}, lastPx = {};
+  let k = 0;
+  const out = { labels: [], invested: [], value: [] };
+  for (const m of months) {
+    while (k < txsS.length && txsS[k].date.slice(0, 7) <= m) {
+      const t = txsS[k++];
+      const h = hold[t.ticker] ||= { qty: 0, cost: 0 };
+      if (t.type === 'buy') { h.cost += t.qty * t.price + (t.fees || 0); h.qty += t.qty; lastPx[t.ticker] = t.price; }
+      else if (t.type === 'sell') { const avg = h.qty > 0 ? h.cost / h.qty : 0; const q = Math.min(t.qty, h.qty); h.qty -= q; h.cost = avg * h.qty; lastPx[t.ticker] = t.price; }
+      else if (t.type === 'split' && h.qty > 0) { const r = (h.qty + t.qty) / h.qty; h.qty = Math.max(0, h.qty + t.qty); if (lastPx[t.ticker] && r > 0) lastPx[t.ticker] /= r; }
+      if (h.qty < 1e-9) { h.qty = 0; h.cost = 0; }
+    }
+    let inv = 0, val = 0;
+    for (const [t, h] of Object.entries(hold)) {
+      if (!h.qty) continue;
+      inv += h.cost;
+      let px = null;
+      if (m === nowM) px = quotes[t]?.price;
+      if (px == null && mensal?.px[t] && mIdx[m] != null) px = mensal.px[t][mIdx[m]];
+      if (px != null) lastPx[t] = px;
+      val += h.qty * (px ?? lastPx[t] ?? h.cost / h.qty);
+    }
+    const [y, mm] = m.split('-');
+    out.labels.push(['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'][+mm - 1] + '/' + y.slice(2));
+    out.invested.push(inv); out.value.push(val);
+  }
+  return out;
+}
+
+function evoChart(s) {
+  const W = 340, H = 180, L = 44, R = 8, T = 10, B = 22, n = s.labels.length;
+  const all = [...s.invested, ...s.value];
+  let lo = Math.min(0, ...all), hi = Math.max(...all) * 1.05 || 1;
+  const x = (i) => L + (n === 1 ? (W - L - R) / 2 : i * (W - L - R) / (n - 1));
+  const y = (v) => T + (1 - (v - lo) / (hi - lo)) * (H - T - B);
+  const line = (a) => a.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join('');
+  const area = `${line(s.value)}L${x(n - 1).toFixed(1)},${y(lo).toFixed(1)}L${x(0).toFixed(1)},${y(lo).toFixed(1)}Z`;
+  const fmtK = (v) => Math.abs(v) >= 1e6 ? dec(v / 1e6) + ' mi' : Math.abs(v) >= 1e3 ? dec(v / 1e3, 0) + ' mil' : dec(v, 0);
+  const yt = [0, 0.5, 1].map((f) => { const v = lo + (hi - lo) * f; return `<text x="${L - 4}" y="${(y(v) + 3).toFixed(1)}" text-anchor="end">${fmtK(v)}</text><line x1="${L}" x2="${W - R}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}" class="gl"/>`; }).join('');
+  const step = Math.max(1, Math.ceil(n / 6));
+  const xl = s.labels.map((l, i) => (i % step === 0 || i === n - 1) && (i === n - 1 || n - 1 - i >= step / 2) ? `<text x="${x(i).toFixed(1)}" y="${H - 6}" text-anchor="middle">${l}</text>` : '').join('');
+  const dots = n <= 24 ? s.value.map((v, i) => `<circle cx="${x(i).toFixed(1)}" cy="${y(v).toFixed(1)}" r="2.2" class="dv"/>`).join('') : '';
+  return `<div class="ppl"><span class="lv">● Patrimônio</span><span class="li">● Investido</span></div>
+    <svg viewBox="0 0 ${W} ${H}" class="evo">${yt}<path d="${area}" class="ar"/><path d="${line(s.invested)}" class="inv"/><path d="${line(s.value)}" class="val"/>${dots}${xl}</svg>`;
+}
+
+function renderEvolution() {
+  const box = $('#evoBox');
+  if (!mensal) { box.innerHTML = '<div class="note">Carregando histórico de preços…</div>'; loadMensal().then(() => { if (mensal) renderEvolution(); else box.innerHTML = '<div class="note">Histórico de preços indisponível agora.</div>'; }); return; }
+  const s = evolution();
+  if (!s) { box.innerHTML = ''; return; }
+  const iv = s.invested[s.invested.length - 1], vv = s.value[s.value.length - 1];
+  const i12 = Math.max(0, s.value.length - 13);
+  box.innerHTML = evoChart(s) + `<div class="kv"><span>Investido hoje</span><b>${money(iv)}</b></div>
+    <div class="kv"><span>Patrimônio hoje</span><b>${money(vv)}</b></div>
+    <div class="kv"><span>Ganho sobre o investido</span><b class="${cls(vv - iv)}">${signed(vv - iv)} (${iv ? pct((vv / iv - 1) * 100) : '—'})</b></div>
+    ${s.value.length > 1 ? `<div class="kv"><span>Patrimônio desde ${s.labels[i12]}</span><b class="${cls(vv - s.value[i12])}">${signed(vv - s.value[i12])}</b></div>` : ''}
+    <div class="note">Fim de cada mês: quantidade que você tinha × preço de fechamento do mês (Yahoo Finance, gerado no GitHub). Sem preço do mês, usa o último preço conhecido.</div>`;
+}
+
 const PALETTE = ['#3b82f6', '#22c55e', '#f59e0b', '#a855f7', '#ef4444', '#14b8a6', '#ec4899', '#84cc16', '#f97316', '#6366f1', '#0ea5e9', '#eab308'];
 
 // =====================================================================
@@ -605,6 +794,7 @@ function renderScreener() {
   const sector = sel.value;
   const need = [...document.querySelectorAll('#scrMethods input[value]:checked')].map((i) => i.value);
   const liquid = $('#scrLiquid').checked;
+  const favOnly = $('#scrFav').checked;
   const noLoss = $('#fNoLoss').checked;
   const good = $('#scrGood').checked;
   const active = Object.keys(FILTERS).filter((id) => $('#' + id).value);
@@ -615,8 +805,9 @@ function renderScreener() {
   const rows = Object.keys(screener.rows).map((t) => valuation(t))
     .filter((r) => !term || norm(r.ticker).includes(term) || norm(r.sector).includes(term) || norm(r.name).includes(term))
     .filter((r) => !sector || r.sector === sector)
+    .filter((r) => !favOnly || favs.has(r.ticker))
     .filter((r) => need.every((m) => r[m]))
-    .filter((r) => !liquid || r.vol >= 1 || owned.has(r.ticker))
+    .filter((r) => !liquid || r.vol >= 1 || owned.has(r.ticker) || favs.has(r.ticker))
     .filter((r) => !noLoss || r.noLoss)
     .filter((r) => !good || gradeOf(r).good)
     .filter((r) => active.every((id) => FILTERS[id](r, $('#' + id).value)));
@@ -634,14 +825,14 @@ function renderScreener() {
   const year = Object.values(screener.rows)[0]?.year;
   $('#scrMeta').innerHTML = `${rows.length} ações · balanço ${year || ''} (CVM)` +
     (d && !isNaN(d) ? ` · preços de ${d.toLocaleDateString('pt-BR')}` : '') +
-    (good ? '<div class="scr-good-note">★ Boas empresas: lucro crescente, dívida líq./EBITDA abaixo de 2x (ou caixa líquido), ROE acima de 15% de forma recorrente, margens estáveis e P/L abaixo da média do setor ou do próprio histórico.</div>' : '');
+    (good ? '<div class="scr-good-note">✓ Boas empresas: lucro crescente, dívida líq./EBITDA abaixo de 2x (ou caixa líquido), ROE acima de 15% de forma recorrente, margens estáveis e P/L abaixo da média do setor ou do próprio histórico.</div>' : '');
 
   const shown = rows.slice(0, 150);
   $('#scrList').innerHTML = (shown.map((r) => {
     const pot = r.potential;
     return `<button class="scr" data-a="${esc(r.ticker)}">
       <div class="scr-top">
-        <div class="scr-l"><span class="t">${esc(r.ticker)}</span>${owned.has(r.ticker) ? '<span class="chip own">na carteira</span>' : ''}
+        <div class="scr-l"><span class="t">${esc(r.ticker)}</span>${favStar(r.ticker)}${owned.has(r.ticker) ? '<span class="chip own">na carteira</span>' : ''}
           <div class="s">${esc(r.sector)}</div></div>
         <div class="scr-sp" title="Lucro por ano">${spark(screener.emp[r.emp].lc)}</div>
         <div class="r"><div class="v ${pot == null ? '' : cls(pot)}">${pot == null ? '—' : pct(pot)}</div>
@@ -963,7 +1154,7 @@ function renderOpp() {
   const last = tri.tri[tri.tri.length - 1];
   $('#oppMeta').innerHTML = `${list.length} ações · lucro de 12 meses subindo (3 dos últimos 4 trimestres, +10% em 1 ano) e cotação 10%+ abaixo de 1 ano atrás · até ${last.slice(5)}º tri/${last.slice(0, 4)}`;
   $('#oppList').innerHTML = list.map((o) => `<button class="opp" data-a="${esc(o.t)}">
-      <div class="scr-top"><div class="scr-l"><span class="t">${esc(o.t)}</span>${owned.has(o.t) ? '<span class="chip own">na carteira</span>' : ''}
+      <div class="scr-top"><div class="scr-l"><span class="t">${esc(o.t)}</span>${favStar(o.t)}${owned.has(o.t) ? '<span class="chip own">na carteira</span>' : ''}
         <div class="s">${esc(o.v?.sector || '')}</div></div>
         <div class="r"><div class="v up">lucro +${dec(o.g, 0)}%</div><div class="s down">cotação ${dec(o.c, 0)}%</div></div></div>
       ${profitPriceChart(o.labels, o.profit, o.price, true)}
@@ -980,7 +1171,7 @@ function drawAsset(ticker, p, h) {
   const cell = (l, val, c = '') => `<div class="cell"><div class="label">${l}</div><div class="v ${c}">${val}</div></div>`;
 
   let html = `<div class="det-head">${logoHtml(ticker, true)}
-      <div><div class="t">${esc(ticker)}</div><div class="s">${esc(q?.name || v?.sector || '')}</div></div>
+      <div><div class="t">${esc(ticker)} ${favStar(ticker)}</div><div class="s">${esc(q?.name || v?.sector || '')}</div></div>
       <div class="det-price">${price ? money(price) : ''}${q ? `<div class="${cls(q.changePct)}">${pct(q.changePct)} hoje</div>` : ''}</div></div>
     ${has ? `<label class="cls-row">Tipo de ativo <select id="posClass">${Object.keys(CLASSES).map((c) =>
       `<option value="${c}"${classOf(ticker) === c ? ' selected' : ''}>${CLASS_ONE[c]}</option>`).join('')}</select></label>` : ''}
@@ -1427,10 +1618,12 @@ function setTab(name) {
   $('#tabCarteira').classList.toggle('hidden', name !== 'Carteira');
   $('#tabScreener').classList.toggle('hidden', name !== 'Screener');
   $('#tabOportunidades').classList.toggle('hidden', name !== 'Oportunidades');
+  $('#tabFavoritas').classList.toggle('hidden', name !== 'Favoritas');
   $('#pageTitle').textContent = name;
   document.querySelectorAll('.tabbar button').forEach((b) => b.classList.toggle('on', b.dataset.tab === name));
   if (name === 'Screener') { renderScreener(); loadScreener(); }
   if (name === 'Oportunidades') renderOpp();
+  if (name === 'Favoritas') { renderFavs(); if ([...favs].some((t) => !quotes[t] || Date.now() - quotes[t].fetchedAt > 5 * 60_000)) refreshQuotes(); }
   window.scrollTo(0, 0);
 }
 
@@ -1443,6 +1636,9 @@ document.addEventListener('click', (e) => {
   if (e.target.tagName === 'DIALOG') { e.target.close(); return; } // toque fora
   const tb = e.target.closest('.tabbar button');
   if (tb) { setTab(tb.dataset.tab); return; }
+  const fv = e.target.closest('[data-fav]');
+  if (fv) { toggleFav(fv.dataset.fav); return; }
+  if (e.target.closest('#goalsEdit')) { openGoals(); return; }
   const pos = e.target.closest('.pos');
   if (pos) { openAsset(pos.dataset.t); return; }
   const scr = e.target.closest('.scr, .opp');
@@ -1485,6 +1681,14 @@ document.querySelectorAll('input[name=comp]').forEach((i) => i.addEventListener(
 ['#scrSearch', '#scrSector', '#scrSort'].forEach((s) => $(s).addEventListener('input', renderScreener));
 $('#scrMethods').addEventListener('change', renderScreener);
 $('#scrAdv').addEventListener('change', renderScreener);
+$('#goalsBox').addEventListener('input', (e) => { if (e.target.id === 'aporte') renderGoals(lastOpen, lastValue); });
+$('#goalsForm').addEventListener('input', updateGoalsSum);
+$('#goalsSave').onclick = () => {
+  goals = {};
+  document.querySelectorAll('#goalsForm input').forEach((i) => { if (+i.value > 0) goals[i.name] = +i.value; });
+  save(KEY_GOALS, goals); $('#dlgGoals').close(); render();
+};
+$('#goalsClear').onclick = () => { goals = {}; save(KEY_GOALS, goals); $('#dlgGoals').close(); render(); };
 $('#posBody').addEventListener('change', async (ev) => {
   if (ev.target.name !== 'hm') return;
   histMode = ev.target.value;
@@ -1543,7 +1747,7 @@ $('#impFiles').onchange = (e) => { const files = [...e.target.files]; e.target.v
 $('#btnDoImport').onclick = doImport;
 
 $('#btnExport').onclick = async () => {
-  const data = JSON.stringify({ app: 'carteira', version: 3, exportedAt: new Date().toISOString(), txs, classes }, null, 2);
+  const data = JSON.stringify({ app: 'carteira', version: 4, exportedAt: new Date().toISOString(), txs, classes, favs: [...favs], goals }, null, 2);
   const name = `carteira-${todayIso()}.json`;
   const file = new File([data], name, { type: 'application/json' });
   if (navigator.canShare && navigator.canShare({ files: [file] })) {
@@ -1579,6 +1783,8 @@ $('#fileImport').onchange = async (e) => {
       classes = Object.fromEntries(Object.entries(j.classes).filter(([, c]) => CLASSES[c]));
       save(KEY_CLASSES, classes);
     }
+    if (Array.isArray(j?.favs)) { favs = new Set(j.favs.map(normTicker)); save(KEY_FAVS, [...favs]); }
+    if (j?.goals && typeof j.goals === 'object') { goals = Object.fromEntries(Object.entries(j.goals).filter(([c, v]) => CLASSES[c] && v > 0)); save(KEY_GOALS, goals); }
     mergeFractional();
     $('#dlgSettings').close();
     render(); refreshQuotes();
