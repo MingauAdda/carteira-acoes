@@ -153,7 +153,7 @@ body { padding-bottom: calc(env(safe-area-inset-bottom) + 150px); }
 .fab { bottom: calc(env(safe-area-inset-bottom) + 84px); }
 .tabbar {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 5;
-  display: grid; grid-template-columns: 1fr 1fr;
+  display: grid; grid-template-columns: 1fr 1fr 1fr;
   background: rgba(16,18,22,.92); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
   border-top: 1px solid var(--line);
   padding: 6px 0 calc(env(safe-area-inset-bottom) + 6px);
@@ -341,3 +341,22 @@ h3.sub small { font-weight: 500; color: var(--muted); font-size: 12px; margin-le
 .htab td.down { color: #ef4444; }
 .kpis .nota { color: #22c55e; font-weight: 700; }
 .scr-good-note { font-size: 12.5px; color: var(--muted); margin: -4px 0 10px; line-height: 1.4; }
+
+/* Lucro x cotação */
+.ppc { margin: 2px 0 6px; }
+.ppl { display: flex; gap: 14px; justify-content: center; font-size: 12px; margin-bottom: 4px; }
+.ppl .lp { color: #22c55e; } .ppl .lq { color: #d6b37a; }
+.ppsvg { width: 100%; height: auto; display: block; }
+.ppsvg .pp { fill: none; stroke: #22c55e; stroke-width: 2; stroke-linejoin: round; }
+.ppsvg .pq { fill: none; stroke: #d6b37a; stroke-width: 2; stroke-linejoin: round; }
+.ppsvg .dp { fill: #22c55e; } .ppsvg .dq { fill: #d6b37a; }
+.ppsvg .gl { stroke: var(--line); stroke-width: .5; }
+.ppsvg .zl { stroke: var(--muted); stroke-width: .8; stroke-dasharray: 3 3; }
+.ppsvg text { font-size: 9px; fill: var(--muted); }
+.ppsvg .tp { fill: #22c55e; } .ppsvg .tq { fill: #d6b37a; }
+.opp { display: block; width: 100%; text-align: left; color: inherit; font: inherit; background: var(--card); border: 0; border-radius: var(--radius); padding: 12px 14px; margin-bottom: 10px; cursor: pointer; }
+.opp .scr-top { display: flex; gap: 10px; }
+.opp .t { font-weight: 700; font-size: 16px; }
+.opp .s { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+.opp .r { text-align: right; } .opp .r .v { font-weight: 700; }
+.opp .r .s.down { color: #ef4444; }

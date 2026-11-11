@@ -12,7 +12,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="apple-touch-icon" href="icons/icon-180.png">
   <link rel="icon" href="icons/icon-192.png">
-  <link rel="stylesheet" href="style.css?v=12">
+  <link rel="stylesheet" href="style.css?v=13">
 </head>
 <body>
   <header class="top">
@@ -94,11 +94,21 @@
       Valor justo por Graham e Bazin é estimativa para estudo, <b>não recomendação de investimento</b>.</p>
   </main>
 
+  <!-- Aba Oportunidades -->
+  <main id="tabOportunidades" class="hidden">
+    <div class="scr-meta" id="oppMeta"></div>
+    <section id="oppList" class="list"></section>
+    <p class="disclaimer">Lucro dos últimos 12 meses (soma de 4 trimestres, CVM) comparado com o de 1 ano antes;
+      cotação de hoje comparada com a do fim do mesmo trimestre de 1 ano antes (Yahoo Finance / brapi).
+      Divergência não garante alta: confira a análise de cada ação. <b>Não é recomendação de investimento.</b></p>
+  </main>
+
   <button id="btnAdd" class="fab" aria-label="Nova operação">+</button>
 
   <nav class="tabbar">
     <button data-tab="Carteira" class="on"><span>◔</span>Carteira</button>
     <button data-tab="Screener"><span>☰</span>Screener</button>
+    <button data-tab="Oportunidades"><span>⇅</span>Oportunidades</button>
   </nav>
 
   <!-- Nova operação -->
@@ -220,6 +230,6 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js?v=12"></script>
+  <script src="app.js?v=13"></script>
 </body>
 </html>

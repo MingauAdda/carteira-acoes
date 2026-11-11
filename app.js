@@ -581,6 +581,7 @@ function renderScreener() {
 async function openAsset(ticker) {
   const p = positions().find((x) => x.ticker === ticker);
   drawAsset(ticker, p, null);
+  if (!tri && screener?.tk[ticker]) loadTri().then(() => { const b = $('#ppBox'); if (b && $('#posBody').dataset.t === ticker) b.innerHTML = ppBlock(ticker); });
   $('#posAddTx').dataset.t = ticker;
   showDialog('#dlgPos');
   try {
@@ -798,6 +799,100 @@ function histBlock(t, v) {
       <div class="note">${tri_ ? 'Trimestre de 3 meses (o 4º = ano − 9 meses). ROE, Dív./EBITDA e P/L usam os últimos 12 meses.' : 'P/L e DY de cada ano usam o preço no fim do ano.'} Fonte: CVM; preços: Yahoo Finance.</div></div>`;
 }
 
+// ---- Lucro x cotação (dois eixos)
+const brMi = (x) => x == null ? '—' : Math.abs(x) >= 1000 ? `R$ ${dec(x / 1000)} bi` : `R$ ${dec(x, 0)} mi`;
+function profitPriceChart(labels, profit, price, compact = false) {
+  const W = 340, H = compact ? 150 : 190, L = 46, R = 40, T = 12, B = 22;
+  const n = labels.length;
+  const ext = (a) => { const v = a.filter((x) => x != null); if (!v.length) return null; let lo = Math.min(...v), hi = Math.max(...v); if (lo === hi) { lo -= 1; hi += 1; } const pad = (hi - lo) * 0.08; return [lo - pad, hi + pad]; };
+  const ep = ext(profit), eq = ext(price);
+  if (!ep || !eq) return '';
+  const x = (i) => L + (n === 1 ? 0 : i * (W - L - R) / (n - 1));
+  const y = (v, [lo, hi]) => T + (1 - (v - lo) / (hi - lo)) * (H - T - B);
+  const path = (a, e) => { let d = '', pen = false; a.forEach((v, i) => { if (v == null) { pen = false; return; } d += `${pen ? 'L' : 'M'}${x(i).toFixed(1)},${y(v, e).toFixed(1)}`; pen = true; }); return d; };
+  const dots = (a, e, c) => a.map((v, i) => v == null ? '' : `<circle cx="${x(i).toFixed(1)}" cy="${y(v, e).toFixed(1)}" r="2.6" class="${c}"/>`).join('');
+  const ticks = (e, side) => [0, 0.5, 1].map((f) => {
+    const v = e[0] + (e[1] - e[0]) * f, yy = y(v, e);
+    return `<text x="${side ? W - R + 4 : L - 4}" y="${(yy + 3).toFixed(1)}" text-anchor="${side ? 'start' : 'end'}" class="${side ? 'tq' : 'tp'}">${side ? dec(v, v < 100 ? 2 : 0) : (Math.abs(v) >= 1000 ? dec(v / 1000) + ' bi' : dec(v, 0))}</text>
+      <line x1="${L}" x2="${W - R}" y1="${yy.toFixed(1)}" y2="${yy.toFixed(1)}" class="gl"/>`;
+  }).join('');
+  const step = Math.ceil(n / (compact ? 6 : 7));
+  const xl = labels.map((l, i) => (i % step === 0 || i === n - 1) ? `<text x="${x(i).toFixed(1)}" y="${H - 6}" text-anchor="middle" class="tx">${l}</text>` : '').join('');
+  const zero = ep[0] < 0 && ep[1] > 0 ? `<line x1="${L}" x2="${W - R}" y1="${y(0, ep).toFixed(1)}" y2="${y(0, ep).toFixed(1)}" class="zl"/>` : '';
+  return `<div class="ppc"><div class="ppl"><span class="lp">● Lucro líquido${compact ? ' 12m' : ''}</span><span class="lq">● Cotação</span></div>
+    <svg viewBox="0 0 ${W} ${H}" class="ppsvg">${ticks(ep, 0)}${ticks(eq, 1)}${zero}
+    <path d="${path(profit, ep)}" class="pp"/><path d="${path(price, eq)}" class="pq"/>${dots(profit, ep, 'dp')}${dots(price, eq, 'dq')}${xl}</svg></div>`;
+}
+
+// Série anual + últimos 12 meses (lucro dos 4 últimos trimestres e preço de hoje)
+function annualPP(t) {
+  const [ei, fileClose, k, , px = []] = screener.tk[t];
+  const e = screener.emp[ei];
+  const labels = screener.anos.map(String), profit = [...e.lc], price = [...px];
+  const q = tri?.emp[ei];
+  const ttm = q ? sumN(q.lc.slice(-4)) : null;
+  const now = quotes[t]?.price ?? fileClose;
+  if (ttm != null || now) { labels.push('Últ. 12M'); profit.push(ttm); price.push(now); }
+  // corta anos iniciais sem nenhum dado
+  let s0 = 0; while (s0 < labels.length - 1 && profit[s0] == null && price[s0] == null) s0++;
+  return { labels: labels.slice(s0), profit: profit.slice(s0), price: price.slice(s0) };
+}
+function ppBlock(t) {
+  const s = annualPP(t);
+  const c = profitPriceChart(s.labels, s.profit, s.price);
+  return c ? `<h3 class="sub">Lucro x cotação <small>por ano</small></h3><div class="card">${c}
+    <div class="note">Lucro dos controladores (CVM) e cotação no fim de cada ano. Lucro subindo com cotação caindo pode ser oportunidade.</div></div>` : '';
+}
+
+// ---- Oportunidades: lucro de 12 meses subindo e cotação caindo (trimestral)
+function opportunities() {
+  if (!screener || !tri) return null;
+  buildRows();
+  const out = [], seen = new Set();
+  const byVol = Object.entries(screener.tk).sort((a, b) => b[1][3] - a[1][3]); // código mais líquido de cada empresa
+  for (const [t, [ei, fileClose, , vol]] of byVol) {
+    if (seen.has(ei) || vol < 1) continue;
+    const q = tri.emp[ei], px = tri.px[t];
+    if (!q || !px) continue;
+    const ttm = q.lc.map((_, i) => i >= 3 ? sumN(q.lc.slice(i - 3, i + 1)) : null);
+    const iL = ttm.length - 1, iP = iL - 4;
+    const now = quotes[t]?.price ?? fileClose;
+    const p0 = px[iP];
+    if (!(ttm[iL] > 0) || !(ttm[iP] > 0) || !p0 || !now) continue;
+    const g = (ttm[iL] / ttm[iP] - 1) * 100;      // lucro 12m vs 1 ano antes
+    const c = (now / p0 - 1) * 100;               // cotação hoje vs fim do trimestre de 1 ano antes
+    // lucro 12m subindo de forma consistente: em pelo menos 3 dos últimos 4 trimestres, incluindo o último
+    let ups = 0; for (let i = iL - 3; i <= iL; i++) if (ttm[i] != null && ttm[i - 1] != null && ttm[i] > ttm[i - 1]) ups++;
+    const lastUp = ttm[iL] >= ttm[iL - 1];
+    if (g < 10 || c > -10 || !lastUp || ups < 3) continue;
+    seen.add(ei);
+    const labels = [...tri.tri.map((s) => s.slice(5) + 'T' + s.slice(2, 4)).slice(3), 'Hoje'];
+    out.push({ t, ei, g, c, ttm: ttm[iL], labels, profit: [...ttm.slice(3), ttm[iL]], price: [...px.slice(3), now], v: screener.rows[t] });
+  }
+  return out.sort((a, b) => (b.g - b.c) - (a.g - a.c));
+}
+
+function renderOpp() {
+  if (!screener || !tri) {
+    $('#oppMeta').textContent = 'Carregando dados trimestrais…';
+    $('#oppList').innerHTML = '';
+    Promise.all([screener ? null : loadScreener(), loadTri()]).then(() => { if (tab === 'Oportunidades' && screener && tri) renderOpp(); });
+    return;
+  }
+  const list = opportunities();
+  const owned = new Set(positions().filter((p) => p.qty > 0).map((p) => p.ticker));
+  const last = tri.tri[tri.tri.length - 1];
+  $('#oppMeta').innerHTML = `${list.length} ações · lucro de 12 meses subindo (3 dos últimos 4 trimestres, +10% em 1 ano) e cotação 10%+ abaixo de 1 ano atrás · até ${last.slice(5)}º tri/${last.slice(0, 4)}`;
+  $('#oppList').innerHTML = list.map((o) => `<button class="opp" data-a="${esc(o.t)}">
+      <div class="scr-top"><div class="scr-l"><span class="t">${esc(o.t)}</span>${owned.has(o.t) ? '<span class="chip own">na carteira</span>' : ''}
+        <div class="s">${esc(o.v?.sector || '')}</div></div>
+        <div class="r"><div class="v up">lucro +${dec(o.g, 0)}%</div><div class="s down">cotação ${dec(o.c, 0)}%</div></div></div>
+      ${profitPriceChart(o.labels, o.profit, o.price, true)}
+      <div class="kpis"><span>Lucro 12m <b>${brMi(o.ttm)}</b></span><span>P/L <b>${dec(o.v?.pe)}</b></span><span>ROE <b>${o.v?.roe == null ? '—' : pct0(o.v.roe)}</b></span>
+        <span>DY <b>${o.v?.dy == null ? '—' : pct0(o.v.dy)}</b></span></div>
+    </button>`).join('') || '<p class="empty">Nenhuma ação com essa divergência agora.</p>';
+}
+
 function drawAsset(ticker, p, h) {
   const q = quotes[ticker];
   const v = valuation(ticker);
@@ -853,6 +948,7 @@ function drawAsset(ticker, p, h) {
         ${cellv('Dív.líq./EBITDA', v.fin ? 'n/a' : (() => { const [x] = lastNum(yearSeries(ticker).ndEb); return x == null ? '—' : dec(x, 2) + 'x'; })())}
       </div>
       ${analysis(ticker, v)}
+      <div id="ppBox">${ppBlock(ticker)}</div>
       <div id="histBox">${histBlock(ticker, v)}</div>`;
   }
 
@@ -1242,9 +1338,11 @@ function setTab(name) {
   tab = name;
   $('#tabCarteira').classList.toggle('hidden', name !== 'Carteira');
   $('#tabScreener').classList.toggle('hidden', name !== 'Screener');
+  $('#tabOportunidades').classList.toggle('hidden', name !== 'Oportunidades');
   $('#pageTitle').textContent = name;
   document.querySelectorAll('.tabbar button').forEach((b) => b.classList.toggle('on', b.dataset.tab === name));
   if (name === 'Screener') { renderScreener(); loadScreener(); }
+  if (name === 'Oportunidades') renderOpp();
   window.scrollTo(0, 0);
 }
 
@@ -1259,7 +1357,7 @@ document.addEventListener('click', (e) => {
   if (tb) { setTab(tb.dataset.tab); return; }
   const pos = e.target.closest('.pos');
   if (pos) { openAsset(pos.dataset.t); return; }
-  const scr = e.target.closest('.scr');
+  const scr = e.target.closest('.scr, .opp');
   if (scr) { openAsset(scr.dataset.a); return; }
   const del = e.target.closest('[data-del]');
   if (del) {
