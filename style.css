@@ -326,9 +326,9 @@ h3.sub small { font-weight: 500; color: var(--muted); font-size: 12px; margin-le
 .ana .ck { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; border-bottom: 1px solid var(--line); }
 .ana .ck:last-of-type { border-bottom: 0; }
 .ana .ck i { flex: none; width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-style: normal; font-weight: 800; font-size: 12px; background: var(--card2); color: var(--muted); }
-.ana .ck.ok i { background: rgba(34,197,94,.18); color: #22c55e; }
-.ana .ck.warn i { background: rgba(245,158,11,.18); color: #f59e0b; }
-.ana .ck.bad i { background: rgba(239,68,68,.18); color: #ef4444; }
+.ana .ck.s-ok i { background: rgba(34,197,94,.18); color: #22c55e; }
+.ana .ck.s-warn i { background: rgba(245,158,11,.18); color: #f59e0b; }
+.ana .ck.s-bad i { background: rgba(239,68,68,.18); color: #ef4444; }
 .ana .ck b { display: block; font-size: 14px; }
 .ana .ck span { display: block; font-size: 12.5px; color: var(--muted); margin-top: 2px; line-height: 1.35; }
 .bars-g { gap: 3px; }
@@ -339,3 +339,5 @@ h3.sub small { font-weight: 500; color: var(--muted); font-size: 12px; margin-le
 .htab thead th { color: var(--muted); font-weight: 600; }
 .htab tbody th { text-align: left; color: var(--muted); font-weight: 500; position: sticky; left: 0; background: var(--card); }
 .htab td.down { color: #ef4444; }
+.kpis .nota { color: #22c55e; font-weight: 700; }
+.scr-good-note { font-size: 12.5px; color: var(--muted); margin: -4px 0 10px; line-height: 1.4; }

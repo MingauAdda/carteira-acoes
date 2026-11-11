@@ -12,7 +12,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="apple-touch-icon" href="icons/icon-180.png">
   <link rel="icon" href="icons/icon-192.png">
-  <link rel="stylesheet" href="style.css?v=11">
+  <link rel="stylesheet" href="style.css?v=12">
 </head>
 <body>
   <header class="top">
@@ -57,6 +57,7 @@
       <select id="scrSector" aria-label="Setor"><option value="">Todos os setores</option></select>
       <select id="scrSort" aria-label="Ordenar">
         <option value="pot">Maior potencial</option>
+        <option value="nota">Melhor nota na análise</option>
         <option value="potAsc">Menor potencial</option>
         <option value="up">Lucro subindo há mais tempo</option>
         <option value="pe">Menor P/L</option>
@@ -66,6 +67,7 @@
       </select>
     </div>
     <div class="chips" id="scrMethods">
+      <label><input type="checkbox" id="scrGood"><span>★ Boas empresas</span></label>
       <label><input type="checkbox" id="scrLiquid" checked><span>Com liquidez</span></label>
       <label><input type="checkbox" value="graham"><span>Graham</span></label>
       <label><input type="checkbox" value="bazin"><span>Bazin</span></label>
@@ -218,6 +220,6 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js?v=11"></script>
+  <script src="app.js?v=12"></script>
 </body>
 </html>

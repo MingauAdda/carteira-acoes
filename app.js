@@ -527,6 +527,7 @@ function renderScreener() {
   const need = [...document.querySelectorAll('#scrMethods input[value]:checked')].map((i) => i.value);
   const liquid = $('#scrLiquid').checked;
   const noLoss = $('#fNoLoss').checked;
+  const good = $('#scrGood').checked;
   const active = Object.keys(FILTERS).filter((id) => $('#' + id).value);
   const owned = new Set(positions().filter((p) => p.qty > 0).map((p) => p.ticker));
   const nAdv = active.length + (noLoss ? 1 : 0);
@@ -538,19 +539,23 @@ function renderScreener() {
     .filter((r) => need.every((m) => r[m]))
     .filter((r) => !liquid || r.vol >= 1 || owned.has(r.ticker))
     .filter((r) => !noLoss || r.noLoss)
+    .filter((r) => !good || gradeOf(r).good)
     .filter((r) => active.every((id) => FILTERS[id](r, $('#' + id).value)));
+  const sortBy = $('#scrSort').value;
   const asc = (f) => (a, b) => (f(a) ?? Infinity) - (f(b) ?? Infinity);
   const desc = (f) => (a, b) => (f(b) ?? -Infinity) - (f(a) ?? -Infinity);
   rows.sort({
     pot: desc((r) => r.potential), potAsc: asc((r) => r.potential), pe: asc((r) => r.pe), dy: desc((r) => r.dy),
     roe: desc((r) => r.roe), up: (a, b) => b.profitUp - a.profitUp || (b.roe ?? -1e9) - (a.roe ?? -1e9),
     tk: (a, b) => a.ticker.localeCompare(b.ticker),
+    nota: (a, b) => gradeOf(b).score - gradeOf(a).score || (b.roe ?? -1e9) - (a.roe ?? -1e9),
   }[$('#scrSort').value] || desc((r) => r.potential));
 
   const d = screener.rodada ? new Date(screener.rodada) : null;
   const year = Object.values(screener.rows)[0]?.year;
   $('#scrMeta').innerHTML = `${rows.length} ações · balanço ${year || ''} (CVM)` +
-    (d && !isNaN(d) ? ` · preços de ${d.toLocaleDateString('pt-BR')}` : '');
+    (d && !isNaN(d) ? ` · preços de ${d.toLocaleDateString('pt-BR')}` : '') +
+    (good ? '<div class="scr-good-note">★ Boas empresas: lucro crescente, dívida líq./EBITDA abaixo de 2x (ou caixa líquido), ROE acima de 15% de forma recorrente, margens estáveis e P/L abaixo da média do setor ou do próprio histórico.</div>' : '');
 
   const shown = rows.slice(0, 150);
   $('#scrList').innerHTML = (shown.map((r) => {
@@ -564,7 +569,7 @@ function renderScreener() {
           <div class="s">${money(r.price)}${r.combined ? ` → ${money(r.combined)}` : ''}</div></div>
       </div>
       <div class="kpis"><span>P/L <b>${dec(r.pe)}</b></span><span>ROE <b>${r.roe == null ? '—' : pct0(r.roe)}</b></span>
-        <span>DY <b>${r.dy == null ? '—' : pct0(r.dy)}</b></span>${r.profitUp >= 2 ? `<span class="up">lucro ↑ ${r.profitUp} anos</span>` : ''}</div>
+        <span>DY <b>${r.dy == null ? '—' : pct0(r.dy)}</b></span>${r.profitUp >= 2 ? `<span class="up">lucro ↑ ${r.profitUp} anos</span>` : ''}${good || sortBy === 'nota' ? (() => { const g = gradeOf(r); return `<span class="nota">✓ ${g.score}/${g.total}</span>`; })() : ''}</div>
     </button>`;
   }).join('') + (rows.length > shown.length ? `<p class="note">Mostrando 150 de ${rows.length}. Use a busca ou os filtros.</p>` : ''))
     || '<p class="empty">Nenhuma ação com esses filtros.</p>';
@@ -646,19 +651,26 @@ function loadTri() {
 }
 
 // P/L mediano do setor (empresas com lucro)
+let secPE = null;
 function sectorPE(sector) {
   buildRows();
+  if (secPE?.rows === screener.rows) return secPE.map.get(sector) ?? null;
+  secPE = { rows: screener.rows, map: new Map() };
+  for (const sec of new Set(Object.values(screener.rows).map((r) => r.sector))) secPE.map.set(sec, sectorPE0(sec));
+  return secPE.map.get(sector) ?? null;
+}
+function sectorPE0(sector) {
   const v = Object.values(screener.rows).filter((r) => r.sector === sector && r.pe > 0 && r.pe < 100);
   const seen = new Set(), pes = [];
   for (const r of v) if (!seen.has(r.emp)) { seen.add(r.emp); pes.push(r.pe); }
   return pes.length >= 3 ? { pe: median(pes), n: pes.length } : null;
 }
 
-function analysis(t, v) {
+function analysisItems(t, v) {
   const e = screener.emp[v.emp];
   const s = yearSeries(t);
   const items = [];
-  const add = (st, title, text) => items.push({ st, title, text });
+  const add = (st, title, text, id) => items.push({ st, title, text, id });
   const last = (a, n) => a.slice(-n);
 
   // 1. Lucro crescente e consistente
@@ -672,17 +684,17 @@ function analysis(t, v) {
     const ratio = ups / (lcs.length - 1);
     add(losses === 0 && ratio >= 0.6 && cagr > 0 ? 'ok' : cagr > 0 && losses <= 1 ? 'warn' : 'bad', 'Lucro crescente',
       `Subiu em ${ups} de ${lcs.length - 1} anos (${screener.anos[i0]}–${screener.anos[i1]})` +
-      (cagr != null ? ` · ${cagr >= 0 ? '+' : ''}${dec(cagr)}% ao ano` : '') + (losses ? ` · ${losses} ano${losses > 1 ? 's' : ''} com prejuízo` : ''));
+      (cagr != null ? ` · ${cagr >= 0 ? '+' : ''}${dec(cagr)}% ao ano` : '') + (losses ? ` · ${losses} ano${losses > 1 ? 's' : ''} com prejuízo` : ''), 'lucro');
   }
 
   // 2. Dívida líquida / EBITDA
-  if (e.fin) add('na', 'Dívida líquida/EBITDA', 'Não se aplica a bancos e seguradoras.');
+  if (e.fin) add('na', 'Dívida líquida/EBITDA', 'Não se aplica a bancos e seguradoras.', 'divida');
   else {
     const [nd] = lastNum(s.ndEb);
     const [dl] = lastNum(e.dla || []);
-    if (dl != null && dl < 0) add('ok', 'Dívida líquida/EBITDA', 'Caixa maior que a dívida (caixa líquido).');
-    else if (nd != null) add(nd < 2 ? 'ok' : nd <= 3 ? 'warn' : 'bad', 'Dívida líquida/EBITDA', `${dec(nd, 2)}x · bom abaixo de 2–3x (varia por setor)`);
-    else add('na', 'Dívida líquida/EBITDA', 'EBITDA negativo ou sem dados.');
+    if (dl != null && dl < 0) add('ok', 'Dívida líquida/EBITDA', 'Caixa maior que a dívida (caixa líquido).', 'divida');
+    else if (nd != null) add(nd < 2 ? 'ok' : nd <= 3 ? 'warn' : 'bad', 'Dívida líquida/EBITDA', `${dec(nd, 2)}x · bom abaixo de 2–3x (varia por setor)`, 'divida');
+    else add('bad', 'Dívida líquida/EBITDA', 'EBITDA negativo ou sem dados.', 'divida');
   }
 
   // 3. ROE acima de 15% de forma recorrente
@@ -690,7 +702,7 @@ function analysis(t, v) {
   if (roes.length) {
     const hi = roes.filter((x) => x >= 15).length;
     add(hi >= 4 && roes[roes.length - 1] >= 15 ? 'ok' : hi >= 2 ? 'warn' : 'bad', 'ROE acima de 15%',
-      `Em ${hi} de ${roes.length} anos · último ${pct0(roes[roes.length - 1])} · média ${pct0(roes.reduce((a, b) => a + b, 0) / roes.length)}`);
+      `Em ${hi} de ${roes.length} anos · último ${pct0(roes[roes.length - 1])} · média ${pct0(roes.reduce((a, b) => a + b, 0) / roes.length)}`, 'roe');
   }
 
   // 4. Margens estáveis ou crescentes
@@ -699,7 +711,7 @@ function analysis(t, v) {
     if (ms.length >= 3) {
       const first = ms.slice(0, -1).reduce((a, b) => a + b, 0) / (ms.length - 1), lastM = ms[ms.length - 1];
       const st = lastM <= 0 ? 'bad' : lastM >= first - 1 ? (lastM < 3 ? 'warn' : 'ok') : lastM >= first * 0.7 ? 'warn' : 'bad';
-      add(st, 'Margens', `Margem líquida ${pct0(lastM)} no último ano · média anterior ${pct0(first)}`);
+      add(st, 'Margens', `Margem líquida ${pct0(lastM)} no último ano · média anterior ${pct0(first)}`, 'margem');
     }
   }
 
@@ -707,12 +719,12 @@ function analysis(t, v) {
   if (v.pe != null) {
     const sp = sectorPE(v.sector);
     if (sp) add(v.pe <= sp.pe ? 'ok' : v.pe <= sp.pe * 1.3 ? 'warn' : 'bad', 'P/L vs setor',
-      `${dec(v.pe)} vs ${dec(sp.pe)} (mediana de ${sp.n} empresas de ${v.sector})`);
-    else add('info', 'P/L vs setor', `${dec(v.pe)} · poucas empresas no setor ${v.sector} para comparar`);
+      `${dec(v.pe)} vs ${dec(sp.pe)} (mediana de ${sp.n} empresas de ${v.sector})`, 'plSetor');
+    else add('info', 'P/L vs setor', `${dec(v.pe)} · poucas empresas no setor ${v.sector} para comparar`, 'plSetor');
     const hist = median(last(s.pe, 5));
     if (hist) add(v.pe <= hist ? 'ok' : v.pe <= hist * 1.3 ? 'warn' : 'bad', 'P/L vs histórico',
-      `${dec(v.pe)} vs ${dec(hist)} (mediana dos últimos 5 anos)`);
-  } else add('bad', 'P/L', 'Sem lucro no último ano: P/L não se aplica.');
+      `${dec(v.pe)} vs ${dec(hist)} (mediana dos últimos 5 anos)`, 'plHist');
+  } else add('bad', 'P/L', 'Sem lucro no último ano: P/L não se aplica.', 'plSetor');
 
   // 6. P/VP (mais útil para bancos e empresas com muitos ativos)
   if (v.pvp != null) add(e.fin ? (v.pvp <= 1.5 ? 'ok' : v.pvp <= 2.5 ? 'warn' : 'bad') : 'info', 'P/VP',
@@ -726,9 +738,32 @@ function analysis(t, v) {
       `${pct0(v.dy)}` + (v.dy > 12 ? ' · muito alto: pode ser pontual ou sinal de problema' : spike ? ' · último ano bem acima da média (pode não se repetir)' : v.dy >= 4 ? ' · bom para renda' : ' · baixo para quem busca renda'));
   }
 
+  return items;
+}
+
+// "Boa empresa": saúde financeira toda boa e preço não esticado
+function grade(t, v) {
+  const it = analysisItems(t, v);
+  const st = (id) => it.filter((x) => x.id === id).map((x) => x.st);
+  const okOr = (id, ...alt) => { const a = st(id); return a.length > 0 && a.every((x) => x === 'ok' || alt.includes(x)); };
+  const health = okOr('lucro') && okOr('divida', 'na') && okOr('roe') && (v.fin || okOr('margem'));
+  const price = [...st('plSetor'), ...st('plHist')];
+  const fair = price.length > 0 && !price.includes('bad') && price.includes('ok');
+  const score = it.filter((x) => x.st === 'ok').length, total = it.filter((x) => x.st !== 'info' && x.st !== 'na').length;
+  return { good: health && fair, score, total };
+}
+const gradeCache = new Map();
+function gradeOf(r) {
+  const key = r.ticker + '|' + r.price;
+  if (!gradeCache.has(key)) gradeCache.set(key, grade(r.ticker, r));
+  return gradeCache.get(key);
+}
+
+function analysis(t, v) {
+  const items = analysisItems(t, v);
   const icon = { ok: '✓', warn: '!', bad: '✕', info: 'i', na: '–' };
   return `<h3 class="sub">Análise <small>balanço ${v.year} · CVM</small></h3><div class="card ana">
-    ${items.map((x) => `<div class="ck ${x.st}"><i>${icon[x.st]}</i><div><b>${x.title}</b><span>${esc(x.text)}</span></div></div>`).join('')}
+    ${items.map((x) => `<div class="ck s-${x.st}"><i>${icon[x.st]}</i><div><b>${x.title}</b><span>${esc(x.text)}</span></div></div>`).join('')}
     <div class="note">Regras de bolso para estudo, não é recomendação.</div></div>`;
 }
 
