@@ -437,7 +437,37 @@ def main(out_path, tri_path):
         if any(x is not None for x in qv):
             qpx[code] = qv
 
+    # ---------------- Preço mensal (5 anos) para a evolução do patrimônio ----------------
+    # ações do screener + FIIs/ETFs/BDRs com liquidez (R$ 100 mil/dia ou mais)
+    extra = []
+    for kind in ("fund", "bdr"):
+        try:
+            lst = json.loads(get(f"https://brapi.dev/api/quote/list?type={kind}&limit=5000"))["stocks"]
+            extra += [s["stock"] for s in lst if s.get("close") and (s.get("volume") or 0) * s["close"] >= 1e5]
+        except Exception:
+            pass
+    extra = [c for c in dict.fromkeys(extra) if c not in hist]
+    with cf.ThreadPoolExecutor(max_workers=4) as ex:
+        for code, h in ex.map(fetch, extra):
+            if h:
+                hist[code] = h
+    today_m = (today.year, today.month)
+    months = []
+    y_, m_ = today_m
+    for _ in range(60):
+        months.insert(0, (y_, m_))
+        y_, m_ = (y_, m_ - 1) if m_ > 1 else (y_ - 1, 12)
+    mpx = {}
+    for code, h in hist.items():
+        row = [round(h[k], 2) if k in h else None for k in months]
+        if any(x is not None for x in row):
+            mpx[code] = row
+    log(f"preço mensal: {len(mpx)} códigos")
+
     now = dt.datetime.now(dt.timezone(dt.timedelta(hours=-3))).isoformat(timespec="minutes")
+    with open(os.path.join(os.path.dirname(out_path) or ".", "mensal.json"), "w", encoding="utf-8") as f:
+        json.dump({"gerado": now, "meses": [f"{y}-{m:02d}" for y, m in months], "px": mpx},
+                  f, ensure_ascii=False, separators=(",", ":"))
     data = {"gerado": now, "anos": yrs, "emp": emp, "tk": tk}
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
